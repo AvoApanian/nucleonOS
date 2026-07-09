@@ -1,5 +1,4 @@
 org 0x7C00
-
 bits 16
 
 
@@ -8,6 +7,11 @@ start:
 
     xor ax,ax
     mov ds,ax
+
+    mov es,ax
+    mov [bootDrive],dl
+
+   call loadStage2
 
     lgdt [gdtDescriptor]
 
@@ -44,7 +48,7 @@ print:
     mov al,[esi]
 
     cmp al,0
-    je halt
+    je stage2
 
     mov [edi],al
     mov byte [edi+1],0x0F
@@ -53,9 +57,9 @@ print:
     add edi,2
 
     jmp print
-halt:
 
-    jmp halt
+stage2:
+	jmp 0x8000
 
 message:
     db "NucleonOS Welcome :)",0
@@ -88,6 +92,32 @@ gdtDescriptor:
     dw gdt_end - gdStart - 1
     dd gdStart
 
+loadStage2:
 
-times 510-($-$$) db 0
+    mov ah,0x02
+    mov al,1
+    mov ch,0
+    mov cl,2
+    mov dh,0
+    mov dl,[bootDrive]
+
+    mov bx,0x8000
+
+    int 0x13
+
+    jc diskError
+
+    ret
+
+
+diskError:
+    cli
+    hlt
+    jmp diskError
+
+
+bootDrive:
+    db 0
+
+times 510-($-$$) db 0 
 dw 0xAA55
