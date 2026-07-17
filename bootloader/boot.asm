@@ -1,5 +1,6 @@
 org 0x7C00
 bits 16
+%include "config.inc"
 start:
     cli
     xor ax,ax
@@ -7,6 +8,7 @@ start:
     mov es,ax
     mov [bootDrive],dl
     call loadStage2
+    call loadKernel
     lgdt [gdtDescriptor]
     mov eax,cr0
     or eax,1
@@ -48,9 +50,15 @@ gdt_end:
 gdtDescriptor:
     dw gdt_end - gdStart - 1
     dd gdStart
-
 loadStage2:
     mov si,dap
+    mov ah,0x42
+    mov dl,[bootDrive]
+    int 0x13
+    jc diskError
+    ret
+loadKernel:
+    mov si,kernelDap
     mov ah,0x42
     mov dl,[bootDrive]
     int 0x13
@@ -60,15 +68,20 @@ diskError:
     cli
     hlt
     jmp diskError
-
 dap:
     db 0x10
     db 0
-    dw 40
+    dw STAGE2_SECTORS
     dw 0x8000
     dw 0x0000
     dq 1
-
+kernelDap:
+    db 0x10
+    db 0
+    dw KERNEL_SECTORS
+    dw 0x0000
+    dw 0x1000
+    dq KERNEL_LBA
 bootDrive:
     db 0
 times 510-($-$$) db 0
