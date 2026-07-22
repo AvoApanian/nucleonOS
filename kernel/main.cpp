@@ -1,19 +1,12 @@
-extern "C" void kernelMain()
-{
-    volatile char* video = (char*)0xB8000;
+#include "lib/vga/vga.hpp"
+extern void findRSDP();
 
-    const char* msg = "kernel is loading";
-    int row = 4;
-    int offset = row * 80 * 2;
+extern "C" void kernelMain(){
+    vga("Kernel is loading", 0x0F, 1);
 
-    for (int i = 0; msg[i] != '\0'; i++)
-    {
-        video[offset + i*2]     = msg[i];
-        video[offset + i*2 + 1] = 0x0F;
-    }
+    findRSDP();
 
-    while(1)
-    {
+    while(1){
         asm volatile("hlt");
     }
 }
