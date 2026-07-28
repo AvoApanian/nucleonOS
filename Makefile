@@ -1,75 +1,100 @@
 BUILD_DIR = runable
 
 CXXFLAGS = -m64 -ffreestanding -fno-pic -mno-red-zone -fno-stack-protector -O2 -Wall -Wextra
-LDFLAGS  = -T kernel/linker.ld -nostdlib
+LDFLAGS  = -T BIOS/kernel/linker.ld -nostdlib
 
-# Cherche tous les .cpp
-CPP_FILES := $(shell find kernel -name "*.cpp")
+OVMF_CODE = /usr/share/edk2/x64/OVMF_CODE.4m.fd
+OVMF_VARS = /usr/share/edk2/x64/OVMF_VARS.4m.fd
 
-# Place les .o dans runable en gardant l'arborescence
+ESP_IMG = $(BUILD_DIR)/UEFIRun/esp.img
+
+CPP_FILES := $(shell find BIOS/kernel -name "*.cpp")
 OBJ_FILES := $(CPP_FILES:%.cpp=$(BUILD_DIR)/%.o)
 
+.PHONY: all bios uefi clean run-bios run-uefi
 
-all: os.img
+all: bios
 
+# ========== BIOS ==========
+bios: $(BUILD_DIR)/BIOSRun/os.img
 
-# Crée les dossiers automatiquement
 $(BUILD_DIR)/%.o: %.cpp
 	mkdir -p $(dir $@)
 	g++ $(CXXFLAGS) -c $< -o $@
 
-
-# Assembleur kernel
-$(BUILD_DIR)/kernel/start.o: kernel/start.asm
+$(BUILD_DIR)/BIOS/kernel/start.o: BIOS/kernel/start.asm
 	mkdir -p $(dir $@)
 	nasm -f elf64 $< -o $@
 
+$(BUILD_DIR)/BIOS/kernel/kernel.elf: $(BUILD_DIR)/BIOS/kernel/start.o $(OBJ_FILES) BIOS/kernel/linker.ld
+	ld $(LDFLAGS) -o $@ $(BUILD_DIR)/BIOS/kernel/start.o $(OBJ_FILES)
 
-# Link kernel
-$(BUILD_DIR)/kernel/kernel.elf: $(BUILD_DIR)/kernel/start.o $(OBJ_FILES) kernel/linker.ld
-	ld $(LDFLAGS) -o $@ $(BUILD_DIR)/kernel/start.o $(OBJ_FILES)
-
-
-# Kernel binary
-$(BUILD_DIR)/kernel/kernel.bin: $(BUILD_DIR)/kernel/kernel.elf
+$(BUILD_DIR)/BIOS/kernel/kernel.bin: $(BUILD_DIR)/BIOS/kernel/kernel.elf
 	objcopy -O binary $< $@
 
-
-
-# Stage2
-$(BUILD_DIR)/bootloader/stage2.bin: bootloader/stage2.asm
+$(BUILD_DIR)/BIOS/stage2.bin: BIOS/stage2.asm
 	mkdir -p $(dir $@)
 	nasm -f bin $< -o $@
 
-
-# Génération config
-$(BUILD_DIR)/bootloader/config.inc: $(BUILD_DIR)/bootloader/stage2.bin $(BUILD_DIR)/kernel/kernel.bin
-	@STAGE2_SIZE=$$(stat -c%s $(BUILD_DIR)/bootloader/stage2.bin); \
+$(BUILD_DIR)/BIOS/config.inc: $(BUILD_DIR)/BIOS/stage2.bin $(BUILD_DIR)/BIOS/kernel/kernel.bin
+	@STAGE2_SIZE=$$(stat -c%s $(BUILD_DIR)/BIOS/stage2.bin); \
 	STAGE2_SECTORS=$$(( (STAGE2_SIZE + 511) / 512 )); \
-	KERNEL_SIZE=$$(stat -c%s $(BUILD_DIR)/kernel/kernel.bin); \
+	KERNEL_SIZE=$$(stat -c%s $(BUILD_DIR)/BIOS/kernel/kernel.bin); \
 	KERNEL_SECTORS=$$(( (KERNEL_SIZE + 511) / 512 )); \
 	KERNEL_LBA=$$(( 1 + STAGE2_SECTORS )); \
 	echo "STAGE2_SECTORS equ $$STAGE2_SECTORS" > $@; \
 	echo "KERNEL_SECTORS equ $$KERNEL_SECTORS" >> $@; \
 	echo "KERNEL_LBA     equ $$KERNEL_LBA" >> $@; \
-	truncate -s $$(( STAGE2_SECTORS * 512 )) $(BUILD_DIR)/bootloader/stage2.bin
+	truncate -s $$(( STAGE2_SECTORS * 512 )) $(BUILD_DIR)/BIOS/stage2.bin
 
-
-# Boot
-$(BUILD_DIR)/bootloader/boot.bin: bootloader/boot.asm $(BUILD_DIR)/bootloader/config.inc
+$(BUILD_DIR)/BIOS/boot.bin: BIOS/boot.asm $(BUILD_DIR)/BIOS/config.inc
 	mkdir -p $(dir $@)
-	nasm -f bin -I $(BUILD_DIR)/bootloader/ bootloader/boot.asm -o $@
+	nasm -f bin -I $(BUILD_DIR)/BIOS/ BIOS/boot.asm -o $@
 
+$(BUILD_DIR)/BIOSRun/os.img: $(BUILD_DIR)/BIOS/boot.bin $(BUILD_DIR)/BIOS/stage2.bin $(BUILD_DIR)/BIOS/kernel/kernel.bin
+	mkdir -p $(dir $@)
+	cat $^ > $@
 
+run-bios: bios
+	qemu-system-x86_64 -drive file=$(BUILD_DIR)/BIOSRun/os.img,format=raw
 
-# Image finale
-os.img: $(BUILD_DIR)/bootloader/boot.bin $(BUILD_DIR)/bootloader/stage2.bin $(BUILD_DIR)/kernel/kernel.bin
-	cat $^ > $(BUILD_DIR)/os.img
+# ========== UEFI ==========
+uefi: $(BUILD_DIR)/UEFIRun/BOOTX64.EFI
 
+$(BUILD_DIR)/UEFI/bootx64.o: UEFI/bootloader/bootx64.asm
+	mkdir -p $(dir $@)
+	nasm -f win64 $< -o $@
 
+$(BUILD_DIR)/UEFIRun/BOOTX64.EFI: $(BUILD_DIR)/UEFI/bootx64.o UEFI/bootloader/linker.ls
+	mkdir -p $(dir $@)
+	ld -m i386pep \
+	   --image-base 0x140000000 \
+	   --section-alignment 0x1000 \
+	   --file-alignment 0x200 \
+	   -T UEFI/bootloader/linker.ls \
+	   -subsystem 10 \
+	   -e efiMain \
+	   -o $@ \
+	   $(BUILD_DIR)/UEFI/bootx64.o
+
+# Image FAT32 reelle, remplie via mtools (pas de sudo, pas de mount)
+$(ESP_IMG): $(BUILD_DIR)/UEFIRun/BOOTX64.EFI
+	mkdir -p $(dir $@)
+	dd if=/dev/zero of=$@ bs=1M count=64
+	mkfs.fat -F32 $@
+	mmd -i $@ ::EFI
+	mmd -i $@ ::EFI/BOOT
+	mcopy -i $@ $(BUILD_DIR)/UEFIRun/BOOTX64.EFI ::EFI/BOOT/BOOTX64.EFI
+
+run-uefi: uefi $(ESP_IMG)
+	@if [ ! -f $(BUILD_DIR)/UEFIRun/OVMF_VARS.fd ]; then \
+		cp $(OVMF_VARS) $(BUILD_DIR)/UEFIRun/OVMF_VARS.fd; \
+	fi
+	qemu-system-x86_64 \
+		-drive format=raw,file=$(ESP_IMG) \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(BUILD_DIR)/UEFIRun/OVMF_VARS.fd \
+		-boot menu=off
 
 clean:
 	rm -rf $(BUILD_DIR)
-
-
-.PHONY: all clean
