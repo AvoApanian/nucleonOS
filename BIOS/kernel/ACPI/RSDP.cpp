@@ -6,7 +6,7 @@
 
 RSDPDescriptor20* findRSDP(){
 
-    for(uint64_t address = 0xE0000; address < 0x100000; address += 16){
+    for(uint32_t address = 0xE0000; address < 0x100000; address += 16){
 
         char* ptr = (char*)address;
 
@@ -33,7 +33,7 @@ RSDPDescriptor20* findRSDP(){
 
 
             vga("XSDT:",0x0F,0);
-            vgaHex(rsdp->xsdtAddress,0x0F);
+            vgaHex(rsdp->rsdtAddress,0x0F);
 
 
             return rsdp;

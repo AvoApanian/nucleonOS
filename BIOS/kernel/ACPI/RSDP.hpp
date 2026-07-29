@@ -17,7 +17,6 @@ struct RSDPDescriptor20 {
 
     uint32_t length;
 
-    uint64_t xsdtAddress;
 
     uint8_t extendedChecksum;
 

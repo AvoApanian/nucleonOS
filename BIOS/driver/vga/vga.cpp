@@ -22,7 +22,7 @@ void vga(const char* text, uint8_t color, uint8_t newline)
 
 
 
-void vgaHex(uint64_t value, uint8_t color){
+void vgaHex(uint32_t value, uint8_t color){
     char buffer[17];
     const char* hex = "0123456789ABCDEF";
     buffer[16] = '\0';
