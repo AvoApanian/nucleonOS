@@ -1,4 +1,4 @@
-#include "lib/vga/vga.hpp"
+#include "../driver/vga/vga.hpp"
 extern void findRSDP();
 
 extern "C" void kernelMain(){

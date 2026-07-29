@@ -1,8 +1,7 @@
-bits 64
+bits 32
 section .text.start
 global _start
 extern kernelMain
-
 _start:
     call kernelMain
 .hang:

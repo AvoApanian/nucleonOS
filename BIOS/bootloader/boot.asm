@@ -20,6 +20,7 @@ protected_mode:
     mov ds,ax
     mov es,ax
     mov ss,ax
+    mov esp,0x90000
     mov edi,0xB8000
     mov ecx,2000
 clearScreen:
@@ -85,3 +86,4 @@ kernelDap:
 bootDrive:
     db 0
 times 510-($-$$) db 0
+dw 0xAA55
