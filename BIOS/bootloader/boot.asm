@@ -28,7 +28,7 @@ clearScreen:
     add edi,2
     loop clearScreen
     mov esi,message
-    mov edi,0xB8000 + ((12*80+30)*2)
+    mov edi,0xB8000 + ((12*80+45)*2)
 print:
     mov al,[esi]
     cmp al,0

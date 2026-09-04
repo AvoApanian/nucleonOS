@@ -3,4 +3,4 @@
 #include "../types.hpp"
 #include "SDT.hpp"
 
-ACPISDTHeader* getXSDT(uint32_t address);
+ACPISDTHeader* getRSDT(uint32_t address);

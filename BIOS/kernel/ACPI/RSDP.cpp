@@ -21,34 +21,50 @@ static uint32_t getXSDTAddress32(const RSDPDescriptor20* rsdp)
 RSDPDescriptor20* findRSDP()
 {
 	for(uint32_t address = 0xE0000;
-		address < 0x100000;
-		address += 16)
-	{
+	    address < 0x100000;
+	    address += 16){
+
 		char* ptr = (char*)address;
 
-		if(ptr[0] != 'R')
-			continue;
+		if(ptr[0] != 'R'){
 
-		if(ptr[1] != 'S')
 			continue;
+		}
 
-		if(ptr[2] != 'D')
-			continue;
+		if(ptr[1] != 'S'){
 
-		if(ptr[3] != ' ')
 			continue;
+		}
 
-		if(ptr[4] != 'P')
-			continue;
+		if(ptr[2] != 'D'){
 
-		if(ptr[5] != 'T')
 			continue;
+		}
 
-		if(ptr[6] != 'R')
-			continue;
+		if(ptr[3] != ' '){
 
-		if(ptr[7] != ' ')
 			continue;
+		}
+
+		if(ptr[4] != 'P'){
+
+			continue;
+		}
+
+		if(ptr[5] != 'T'){
+
+			continue;
+		}
+
+		if(ptr[6] != 'R'){
+
+			continue;
+		}
+
+		if(ptr[7] != ' '){
+
+			continue;
+		}
 
 		RSDPDescriptor20* rsdp =
 			(RSDPDescriptor20*)address;
@@ -64,8 +80,8 @@ RSDPDescriptor20* findRSDP()
 		vga("RSDT:", 0x0F, 0);
 		vgaHex(rsdp->rsdtAddress, 0x0F);
 
-		if(rsdp->revision < 2)
-		{
+		if(rsdp->revision < 2){
+
 			vga("ACPI 1.0 - USING RSDT", 0x0F, 1);
 
 			getRSDT(rsdp->rsdtAddress);
@@ -76,17 +92,33 @@ RSDPDescriptor20* findRSDP()
 		uint32_t xsdtAddress =
 			getXSDTAddress32(rsdp);
 
-		vga("XSDT:", 0x0F, 0);
-		vgaHex(xsdtAddress, 0x0F);
+		if(xsdtAddress == 0){
 
-		if(xsdtAddress == 0)
-		{
 			vga("XSDT ADDRESS NULL", 0x04, 1);
 
 			return rsdp;
 		}
 
+		vga("XSDT:", 0x0F, 0);
+		vgaHex(xsdtAddress, 0x0F);
+
+		/*
+		 * DEBUG:
+		 * Vérifie que l'exécution arrive bien
+		 * jusqu'à l'appel de getXSDT().
+		 */
+
+		vga("RSDP: BEFORE XSDT", 0x0F, 1);
+
 		getXSDT(xsdtAddress);
+
+		/*
+		 * DEBUG:
+		 * Si ce message apparaît, getXSDT()
+		 * est bien revenu.
+		 */
+
+		vga("RSDP: AFTER XSDT", 0x0A, 1);
 
 		return rsdp;
 	}
