@@ -1,6 +1,9 @@
 global efiMain
 default rel
 
+LOG_START_ROW equ 11
+VISIBLE_ROWS equ 14
+
 section .text
 
 efiMain:
@@ -8,11 +11,341 @@ efiMain:
 	mov	r12, rdx
 	mov	r13, [r12 + 64]
 
+	lea	rax, [log_buffer]
+	mov	[log_write_ptr], rax
+	mov	[log_line_ptr], rax
+	mov	dword [log_line_total], 1
+	mov	dword [scroll_offset], 0
+
+	call	redraw_screen
+
+	lea	rdx, [message]
+	call	print_str
+
+	mov	rcx, [r12 + 104]
+	mov	rbx, [r12 + 112]
+
+search_loop:
+	cmp	rcx, 0
+	je	acpi_not_found
+
+	cmp	dword [rbx + 0], 0x8868E871
+	jne	next_entry
+
+	cmp	word [rbx + 4], 0xE4F1
+	jne	next_entry
+
+	cmp	word [rbx + 6], 0x11D3
+	jne	next_entry
+
+	cmp	byte [rbx + 8], 0xBC
+	jne	next_entry
+
+	cmp	byte [rbx + 9], 0x22
+	jne	next_entry
+
+	cmp	byte [rbx + 10], 0x00
+	jne	next_entry
+
+	cmp	byte [rbx + 11], 0x80
+	jne	next_entry
+
+	cmp	byte [rbx + 12], 0xC7
+	jne	next_entry
+
+	cmp	byte [rbx + 13], 0x3C
+	jne	next_entry
+
+	cmp	byte [rbx + 14], 0x88
+	jne	next_entry
+
+	cmp	byte [rbx + 15], 0x81
+	jne	next_entry
+
+	mov	r14, [rbx + 16]
+
+	cmp	dword [r14 + 0], 0x20445352
+	jne	rsdp_invalid
+
+	cmp	dword [r14 + 4], 0x20525450
+	jne	rsdp_invalid
+
+	lea	rdx, [acpiFound]
+	call	print_str
+
+	lea	rdx, [rsdpValid]
+	call	print_str
+
+	mov	r15, [r14 + 24]
+
+	cmp	dword [r15 + 0], 0x54445358
+	jne	xsdt_invalid
+
+	lea	rdx, [xsdtValid]
+	call	print_str
+
+	mov	eax, [r15 + 4]
+
+	cmp	eax, 36
+	jb	xsdt_invalid
+
+	sub	eax, 36
+	shr	eax, 3
+	mov	r14d, eax
+
+	lea	rdx, [xsdtHeaderValid]
+	call	print_str
+
+	cmp	r14d, 0
+	je	facp_not_found
+
+	lea	rbx, [r15 + 36]
+
+xsdt_loop:
+	mov	rax, [rbx]
+
+	cmp	dword [rax + 0], 0x50434146
+	je	facp_found
+
+	add	rbx, 8
+	dec	r14d
+
+	cmp	r14d, 0
+	jne	xsdt_loop
+
+	jmp	facp_not_found
+
+facp_found:
+	mov	r15, rax
+
+	lea	rdx, [facpFound]
+	call	print_str
+
+	mov	rbx, [r15 + 140]
+
+	cmp	rbx, 0
+	jne	dsdt_address_ready
+
+	mov	eax, [r15 + 40]
+	mov	ebx, eax
+
+	cmp	rbx, 0
+	je	dsdt_not_found
+
+dsdt_address_ready:
+	mov	r14, rbx
+
+	lea	rdx, [dsdtAddressFound]
+	call	print_str
+
+	cmp	dword [r14 + 0], 0x54445344
+	jne	dsdt_invalid
+
+	lea	rdx, [dsdtValid]
+	call	print_str
+
+	mov	r15d, [r14 + 4]
+
+	cmp	r15d, 36
+	jb	dsdt_length_invalid
+
+	lea	rdx, [dsdtLengthLabel]
+	call	print_str
+
+	mov	edx, r15d
+	mov	ecx, 8
+	lea	rdi, [lengthBuf]
+	call	hex_to_utf16
+
+	lea	rdx, [lengthBuf]
+	call	print_str
+
+	lea	rdx, [newline]
+	call	print_str
+
+	xor	eax, eax
+	xor	ecx, ecx
+
+checksum_loop:
+	cmp	ecx, r15d
+	jae	checksum_done
+
+	movzx	edx, byte [r14 + rcx]
+	add	al, dl
+	inc	ecx
+
+	jmp	checksum_loop
+
+checksum_done:
+	test	al, al
+	jnz	dsdt_checksum_invalid
+
+	lea	rdx, [dsdtChecksumValid]
+	call	print_str
+
+	lea	rbx, [r14 + 36]
+	sub	r15d, 36
+
+	lea	rdx, [amlAddressLabel]
+	call	print_str
+
+	mov	rdx, rbx
+	mov	ecx, 16
+	lea	rdi, [addrBuf]
+	call	hex_to_utf16
+
+	lea	rdx, [addrBuf]
+	call	print_str
+
+	lea	rdx, [newline]
+	call	print_str
+
+	lea	rdx, [amlSizeLabel]
+	call	print_str
+
+	mov	edx, r15d
+	mov	ecx, 8
+	lea	rdi, [sizeBuf]
+	call	hex_to_utf16
+
+	lea	rdx, [sizeBuf]
+	call	print_str
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_dump
+
+	jmp	enter_ui
+
+next_entry:
+	add	rbx, 24
+	dec	rcx
+	jmp	search_loop
+
+acpi_not_found:
+	lea	rdx, [acpiNotFound]
+	call	print_str
+	jmp	enter_ui
+
+rsdp_invalid:
+	lea	rdx, [rsdpInvalid]
+	call	print_str
+	jmp	enter_ui
+
+xsdt_invalid:
+	lea	rdx, [xsdtInvalid]
+	call	print_str
+	jmp	enter_ui
+
+facp_not_found:
+	lea	rdx, [facpNotFound]
+	call	print_str
+	jmp	enter_ui
+
+dsdt_not_found:
+	lea	rdx, [dsdtNotFound]
+	call	print_str
+	jmp	enter_ui
+
+dsdt_invalid:
+	lea	rdx, [dsdtInvalid]
+	call	print_str
+	jmp	enter_ui
+
+dsdt_length_invalid:
+	lea	rdx, [dsdtLengthInvalid]
+	call	print_str
+	jmp	enter_ui
+
+dsdt_checksum_invalid:
+	lea	rdx, [dsdtChecksumInvalid]
+	call	print_str
+	jmp	enter_ui
+
+enter_ui:
+	call	redraw_screen
+
+input_loop:
+	mov	rcx, [r12 + 48]
+	lea	rdx, [key_buf]
+	mov	rax, [rcx + 8]
+	call	rax
+
+	cmp	rax, 0
+	jne	input_loop
+
+	movzx	eax, word [key_buf + 2]
+
+	cmp	eax, 0x77
+	je	scroll_up
+	cmp	eax, 0x57
+	je	scroll_up
+	cmp	eax, 0x73
+	je	scroll_down
+	cmp	eax, 0x53
+	je	scroll_down
+
+	jmp	input_loop
+
+scroll_up:
+	cmp	dword [scroll_offset], 0
+	je	input_loop
+	dec	dword [scroll_offset]
+	call	redraw_screen
+	jmp	input_loop
+
+scroll_down:
+	mov	eax, [log_line_total]
+	sub	eax, VISIBLE_ROWS
+	cmp	eax, 0
+	jle	input_loop
+	cmp	[scroll_offset], eax
+	jge	input_loop
+	inc	dword [scroll_offset]
+	call	redraw_screen
+	jmp	input_loop
+
+redraw_screen:
 	mov	rcx, r13
-	mov	rdx, 0x09
+	mov	rax, [r13 + 48]
+	call	rax
+
+	mov	rcx, r13
+	mov	rdx, 9
 	mov	rax, [r13 + 40]
 	call	rax
 
+	call	draw_banner
+
+	mov	rcx, r13
+	mov	rdx, 7
+	mov	rax, [r13 + 40]
+	call	rax
+
+	mov	eax, [scroll_offset]
+	mov	[redraw_line], eax
+	mov	dword [redraw_row], 0
+
+redraw_loop:
+	mov	eax, [redraw_row]
+	cmp	eax, VISIBLE_ROWS
+	jae	redraw_done
+
+	mov	eax, [redraw_line]
+	cmp	eax, [log_line_total]
+	jae	redraw_done
+
+	call	draw_log_line
+
+	inc	dword [redraw_line]
+	inc	dword [redraw_row]
+	jmp	redraw_loop
+
+redraw_done:
+	ret
+
+draw_banner:
 	mov	rcx, r13
 	mov	rax, [r13 + 8]
 	lea	rdx, [bannerLine1]
@@ -63,310 +396,44 @@ efiMain:
 	lea	rdx, [bannerLine10]
 	call	rax
 
+	ret
+
+draw_log_line:
+	mov	eax, [redraw_line]
+	lea	rdx, [log_line_ptr]
+	mov	rsi, [rdx + rax * 8]
+
+	lea	rdi, [line_scratch]
+
+draw_log_copy:
+	movzx	ecx, word [rsi]
+	cmp	cx, 13
+	je	draw_log_copy_done
+	cmp	cx, 10
+	je	draw_log_copy_done
+	test	cx, cx
+	jz	draw_log_copy_done
+	mov	word [rdi], cx
+	add	rdi, 2
+	add	rsi, 2
+	jmp	draw_log_copy
+
+draw_log_copy_done:
+	mov	word [rdi], 0
+
 	mov	rcx, r13
-	mov	rdx, 0x07
-	mov	rax, [r13 + 40]
+	mov	edx, 0
+	mov	r8d, [redraw_row]
+	add	r8d, LOG_START_ROW
+	mov	rax, [r13 + 56]
 	call	rax
 
 	mov	rcx, r13
 	mov	rax, [r13 + 8]
-	lea	rdx, [message]
+	lea	rdx, [line_scratch]
 	call	rax
 
-	mov	rcx, [r12 + 104]
-	mov	rbx, [r12 + 112]
-
-search_loop:
-	cmp	rcx, 0
-	je	acpi_not_found
-
-	cmp	dword [rbx + 0], 0x8868E871
-	jne	next_entry
-
-	cmp	word [rbx + 4], 0xE4F1
-	jne	next_entry
-
-	cmp	word [rbx + 6], 0x11D3
-	jne	next_entry
-
-	cmp	byte [rbx + 8], 0xBC
-	jne	next_entry
-
-	cmp	byte [rbx + 9], 0x22
-	jne	next_entry
-
-	cmp	byte [rbx + 10], 0x00
-	jne	next_entry
-
-	cmp	byte [rbx + 11], 0x80
-	jne	next_entry
-
-	cmp	byte [rbx + 12], 0xC7
-	jne	next_entry
-
-	cmp	byte [rbx + 13], 0x3C
-	jne	next_entry
-
-	cmp	byte [rbx + 14], 0x88
-	jne	next_entry
-
-	cmp	byte [rbx + 15], 0x81
-	jne	next_entry
-
-	mov	r14, [rbx + 16]
-
-	cmp	dword [r14 + 0], 0x20445352
-	jne	rsdp_invalid
-
-	cmp	dword [r14 + 4], 0x20525450
-	jne	rsdp_invalid
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [acpiFound]
-	call	rax
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [rsdpValid]
-	call	rax
-
-	mov	r15, [r14 + 24]
-
-	cmp	dword [r15 + 0], 0x54445358
-	jne	xsdt_invalid
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [xsdtValid]
-	call	rax
-
-	mov	eax, [r15 + 4]
-
-	cmp	eax, 36
-	jb	xsdt_invalid
-
-	sub	eax, 36
-	shr	eax, 3
-	mov	r14d, eax
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [xsdtHeaderValid]
-	call	rax
-
-	cmp	r14d, 0
-	je	facp_not_found
-
-	lea	rbx, [r15 + 36]
-
-xsdt_loop:
-	mov	rax, [rbx]
-
-	cmp	dword [rax + 0], 0x50434146
-	je	facp_found
-
-	add	rbx, 8
-	dec	r14d
-
-	cmp	r14d, 0
-	jne	xsdt_loop
-
-	jmp	facp_not_found
-
-facp_found:
-	mov	r15, rax
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [facpFound]
-	call	rax
-
-	mov	rbx, [r15 + 140]
-
-	cmp	rbx, 0
-	jne	dsdt_address_ready
-
-	mov	eax, [r15 + 40]
-	mov	ebx, eax
-
-	cmp	rbx, 0
-	je	dsdt_not_found
-
-dsdt_address_ready:
-	mov	r14, rbx
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [dsdtAddressFound]
-	call	rax
-
-	cmp	dword [r14 + 0], 0x54445344
-	jne	dsdt_invalid
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [dsdtValid]
-	call	rax
-
-	mov	r15d, [r14 + 4]
-
-	cmp	r15d, 36
-	jb	dsdt_length_invalid
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [dsdtLengthLabel]
-	call	rax
-
-	mov	edx, r15d
-	mov	ecx, 8
-	lea	rdi, [lengthBuf]
-	call	hex_to_utf16
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [lengthBuf]
-	call	rax
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [newline]
-	call	rax
-
-	xor	eax, eax
-	xor	ecx, ecx
-
-checksum_loop:
-	cmp	ecx, r15d
-	jae	checksum_done
-
-	movzx	edx, byte [r14 + rcx]
-	add	al, dl
-	inc	ecx
-
-	jmp	checksum_loop
-
-checksum_done:
-	test	al, al
-	jnz	dsdt_checksum_invalid
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [dsdtChecksumValid]
-	call	rax
-
-	lea	rbx, [r14 + 36]
-	sub	r15d, 36
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [amlAddressLabel]
-	call	rax
-
-	mov	rdx, rbx
-	mov	ecx, 16
-	lea	rdi, [addrBuf]
-	call	hex_to_utf16
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [addrBuf]
-	call	rax
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [newline]
-	call	rax
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [amlSizeLabel]
-	call	rax
-
-	mov	edx, r15d
-	mov	ecx, 8
-	lea	rdi, [sizeBuf]
-	call	hex_to_utf16
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [sizeBuf]
-	call	rax
-
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [newline]
-	call	rax
-
-	call	aml_dump
-
-	jmp	hang
-
-next_entry:
-	add	rbx, 24
-	dec	rcx
-	jmp	search_loop
-
-acpi_not_found:
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [acpiNotFound]
-	call	rax
-	jmp	hang
-
-rsdp_invalid:
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [rsdpInvalid]
-	call	rax
-	jmp	hang
-
-xsdt_invalid:
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [xsdtInvalid]
-	call	rax
-	jmp	hang
-
-facp_not_found:
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [facpNotFound]
-	call	rax
-	jmp	hang
-
-dsdt_not_found:
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [dsdtNotFound]
-	call	rax
-	jmp	hang
-
-dsdt_invalid:
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [dsdtInvalid]
-	call	rax
-	jmp	hang
-
-dsdt_length_invalid:
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [dsdtLengthInvalid]
-	call	rax
-	jmp	hang
-
-dsdt_checksum_invalid:
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	lea	rdx, [dsdtChecksumInvalid]
-	call	rax
-	jmp	hang
-
-hang:
-	hlt
-	jmp	hang
+	ret
 
 hex_to_utf16:
 	push	rax
@@ -425,12 +492,12 @@ aml_dump:
 	mov	r15, rax
 
 	lea	rdx, [amlParseStart]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_term_list_parse
 
 	lea	rdx, [amlParseDone]
-	call	aml_print_str
+	call	print_str
 
 	ret
 
@@ -499,12 +566,12 @@ aml_do_scope:
 	mov	r15, rax
 
 	lea	rdx, [aml_msg_scope]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_name_string_read
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_term_list_parse
 
@@ -524,12 +591,12 @@ aml_do_device:
 	mov	r15, rax
 
 	lea	rdx, [aml_msg_device]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_name_string_read
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_term_list_parse
 
@@ -540,13 +607,13 @@ aml_do_name:
 	inc	r14
 
 	lea	rdx, [aml_msg_name]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_name_string_read
 	call	aml_parse_data_ref_object
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	ret
 
@@ -572,17 +639,17 @@ aml_parse_data_ref_object:
 
 	push	rax
 	lea	rdx, [aml_msg_eq_hex]
-	call	aml_print_str
+	call	print_str
 	pop	rdx
 
 	mov	ecx, 16
-	call	aml_print_hex
+	call	print_hex
 
 	ret
 
 aml_dro_skip_pkg:
 	lea	rdx, [aml_msg_eq_data]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_skip_pkg_object
 
@@ -592,7 +659,7 @@ aml_dro_string:
 	inc	r14
 
 	lea	rdx, [aml_msg_eq_str]
-	call	aml_print_str
+	call	print_str
 
 	lea	rdi, [aml_name_buf]
 
@@ -613,7 +680,7 @@ aml_dro_str_done:
 	inc	r14
 
 	lea	rdx, [aml_name_buf]
-	call	aml_print_str
+	call	print_str
 
 	ret
 
@@ -628,11 +695,11 @@ aml_skip_pkg_object:
 
 	push	rax
 	lea	rdx, [aml_msg_end_eq]
-	call	aml_print_str
+	call	print_str
 	mov	rdx, [rsp]
 
 	mov	ecx, 16
-	call	aml_print_hex
+	call	print_hex
 
 	pop	rax
 	mov	r14, rax
@@ -641,34 +708,34 @@ aml_skip_pkg_object:
 
 aml_do_bufferstmt:
 	lea	rdx, [aml_msg_bufferstmt]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_skip_pkg_object
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	ret
 
 aml_do_packagestmt:
 	lea	rdx, [aml_msg_packagestmt]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_skip_pkg_object
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	ret
 
 aml_do_varpackagestmt:
 	lea	rdx, [aml_msg_varpackagestmt]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_skip_pkg_object
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	ret
 
@@ -676,26 +743,26 @@ aml_do_opregion:
 	add	r14, 2
 
 	lea	rdx, [aml_msg_opregion]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_name_string_read
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	movzx	eax, byte [r14]
 	inc	r14
 
 	push	rax
 	lea	rdx, [aml_msg_space]
-	call	aml_print_str
+	call	print_str
 	pop	rdx
 
 	mov	ecx, 2
-	call	aml_print_hex
+	call	print_hex
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_read_termarg_integer
 
@@ -704,14 +771,14 @@ aml_do_opregion:
 
 	push	rax
 	lea	rdx, [aml_msg_offset]
-	call	aml_print_str
+	call	print_str
 	pop	rdx
 
 	mov	ecx, 16
-	call	aml_print_hex
+	call	print_hex
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_read_termarg_integer
 
@@ -720,14 +787,14 @@ aml_do_opregion:
 
 	push	rax
 	lea	rdx, [aml_msg_length]
-	call	aml_print_str
+	call	print_str
 	pop	rdx
 
 	mov	ecx, 16
-	call	aml_print_hex
+	call	print_hex
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	ret
 
@@ -744,26 +811,26 @@ aml_do_field:
 	mov	r15, rax
 
 	lea	rdx, [aml_msg_field]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_name_string_read
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	movzx	eax, byte [r14]
 	inc	r14
 
 	push	rax
 	lea	rdx, [aml_msg_flags]
-	call	aml_print_str
+	call	print_str
 	pop	rdx
 
 	mov	ecx, 2
-	call	aml_print_hex
+	call	print_hex
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	mov	dword [aml_field_bit_offset], 0
 
@@ -794,14 +861,14 @@ aml_field_reserved:
 
 	push	rax
 	lea	rdx, [aml_msg_reserved]
-	call	aml_print_str
+	call	print_str
 	pop	rdx
 
 	mov	ecx, 8
-	call	aml_print_hex
+	call	print_hex
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	add	dword [aml_field_bit_offset], eax
 
@@ -811,7 +878,7 @@ aml_field_access:
 	add	r14, 3
 
 	lea	rdx, [aml_msg_access]
-	call	aml_print_str
+	call	print_str
 
 	jmp	aml_field_loop
 
@@ -819,13 +886,13 @@ aml_field_extaccess:
 	add	r14, 4
 
 	lea	rdx, [aml_msg_access]
-	call	aml_print_str
+	call	print_str
 
 	jmp	aml_field_loop
 
 aml_field_connect:
 	lea	rdx, [aml_msg_connect_unsupported]
-	call	aml_print_str
+	call	print_str
 
 	jmp	aml_field_done
 
@@ -844,27 +911,27 @@ aml_field_nameseg_loop:
 	mov	word [rdi], 0
 
 	lea	rdx, [aml_name_buf]
-	call	aml_print_str
+	call	print_str
 
 	lea	rdx, [aml_msg_bitoffset]
-	call	aml_print_str
+	call	print_str
 
 	mov	edx, [aml_field_bit_offset]
 	mov	ecx, 8
-	call	aml_print_hex
+	call	print_hex
 
 	call	aml_pkglength_read
 	mov	r10d, eax
 
 	lea	rdx, [aml_msg_width]
-	call	aml_print_str
+	call	print_str
 
 	mov	edx, eax
 	mov	ecx, 8
-	call	aml_print_hex
+	call	print_hex
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	add	dword [aml_field_bit_offset], r10d
 
@@ -886,12 +953,12 @@ aml_do_method:
 	push	rax
 
 	lea	rdx, [aml_msg_method]
-	call	aml_print_str
+	call	print_str
 
 	call	aml_name_string_read
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	movzx	eax, byte [r14]
 	inc	r14
@@ -899,28 +966,28 @@ aml_do_method:
 
 	push	rax
 	lea	rdx, [aml_msg_argcount]
-	call	aml_print_str
+	call	print_str
 	pop	rdx
 
 	mov	ecx, 2
-	call	aml_print_hex
+	call	print_hex
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	mov	rdx, [rsp]
 	push	rdx
 
 	lea	rdx, [aml_msg_bodyend]
-	call	aml_print_str
+	call	print_str
 
 	pop	rdx
 
 	mov	ecx, 16
-	call	aml_print_hex
+	call	print_hex
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
 	pop	rax
 	mov	r14, rax
@@ -1006,7 +1073,7 @@ aml_ns_finish:
 	mov	word [rdi], 0
 
 	lea	rdx, [aml_name_buf]
-	call	aml_print_str
+	call	print_str
 
 	pop	rdi
 	ret
@@ -1125,20 +1192,49 @@ aml_ti_qword:
 	add	r14, 8
 	ret
 
-aml_print_str:
-	mov	rcx, r13
-	mov	rax, [r13 + 8]
-	call	rax
-	ret
-
-aml_print_hex:
+print_str:
+	push	rsi
 	push	rdi
 
-	lea	rdi, [aml_hex_scratch]
+	mov	rsi, rdx
+	mov	rdi, [log_write_ptr]
+
+print_str_loop:
+	movzx	ecx, word [rsi]
+	test	cx, cx
+	jz	print_str_done
+
+	mov	word [rdi], cx
+	add	rdi, 2
+	add	rsi, 2
+
+	cmp	cx, 10
+	jne	print_str_loop
+
+	mov	[log_write_ptr], rdi
+
+	mov	eax, [log_line_total]
+	lea	rdx, [log_line_ptr]
+	mov	[rdx + rax * 8], rdi
+	inc	dword [log_line_total]
+
+	jmp	print_str_loop
+
+print_str_done:
+	mov	[log_write_ptr], rdi
+
+	pop	rdi
+	pop	rsi
+	ret
+
+print_hex:
+	push	rdi
+
+	lea	rdi, [hex_scratch]
 	call	hex_to_utf16
 
-	lea	rdx, [aml_hex_scratch]
-	call	aml_print_str
+	lea	rdx, [hex_scratch]
+	call	print_str
 
 	pop	rdi
 	ret
@@ -1147,24 +1243,24 @@ aml_unsupported_opcode:
 	push	rax
 
 	lea	rdx, [aml_msg_unsupported_opcode]
-	call	aml_print_str
+	call	print_str
 
 	pop	rdx
 
 	and	edx, 0xFF
 	mov	ecx, 2
-	call	aml_print_hex
+	call	print_hex
 
 	lea	rdx, [newline]
-	call	aml_print_str
+	call	print_str
 
-	jmp	hang
+	jmp	enter_ui
 
 aml_unsupported_dataobject:
 	lea	rdx, [aml_msg_unsupported_data]
-	call	aml_print_str
+	call	print_str
 
-	jmp	hang
+	jmp	enter_ui
 
 section .data
 
@@ -1359,7 +1455,7 @@ addrBuf:
 aml_name_buf:
 	resw	64
 
-aml_hex_scratch:
+hex_scratch:
 	resw	20
 
 aml_error:
@@ -1367,3 +1463,30 @@ aml_error:
 
 aml_field_bit_offset:
 	resd	1
+
+log_buffer:
+	resw	65536
+
+log_write_ptr:
+	resq	1
+
+log_line_ptr:
+	resq	4096
+
+log_line_total:
+	resd	1
+
+scroll_offset:
+	resd	1
+
+redraw_row:
+	resd	1
+
+redraw_line:
+	resd	1
+
+key_buf:
+	resb	8
+
+line_scratch:
+	resw	256
