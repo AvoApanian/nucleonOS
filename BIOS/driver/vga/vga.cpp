@@ -6,7 +6,7 @@
 #define VGA_HEADER_ROWS 7
 #define VGA_LOG_ROWS (VGA_ROWS - VGA_HEADER_ROWS)
 
-#define LOG_LINES 500
+#define LOG_LINES 8192
 
 struct VgaCell
 {

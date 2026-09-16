@@ -18,7 +18,7 @@ STRING_OBJ = runable/BIOS/driver/string/string.o
 KEYBOARD_OBJ = runable/BIOS/driver/keyboard/keyboard.o
 
 
-.PHONY: all bios uefi clean run-bios run-uefi
+.PHONY: all bios uefi clean run-bios run-uefi run-bios-log run-uefi-log
 
 
 all: bios
@@ -121,6 +121,12 @@ run-bios: bios
 		-drive file=$(BUILD_DIR)/BIOSRun/os.img,format=raw
 
 
+run-bios-log: bios
+	qemu-system-x86_64 \
+		-drive file=$(BUILD_DIR)/BIOSRun/os.img,format=raw \
+		-serial stdio
+
+
 # ========================================
 # UEFI
 # ========================================
@@ -170,6 +176,19 @@ run-uefi: uefi $(ESP_IMG)
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(BUILD_DIR)/UEFIRun/OVMF_VARS.fd \
 		-boot menu=off
+
+
+run-uefi-log: uefi $(ESP_IMG)
+	@if [ ! -f $(BUILD_DIR)/UEFIRun/OVMF_VARS.fd ]; then \
+		cp $(OVMF_VARS) $(BUILD_DIR)/UEFIRun/OVMF_VARS.fd; \
+	fi
+
+	qemu-system-x86_64 \
+		-drive format=raw,file=$(ESP_IMG) \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(BUILD_DIR)/UEFIRun/OVMF_VARS.fd \
+		-boot menu=off \
+		-serial stdio
 
 
 clean:

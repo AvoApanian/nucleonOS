@@ -2,6 +2,7 @@
 #include "../../driver/vga/vga.hpp"
 
 #include "FADT.hpp"
+#include "AML.hpp"
 
 static bool isDSDT(const ACPISDTHeader* table)
 {
@@ -353,6 +354,10 @@ FADT* getFADT(uint32_t address)
     vga("================================", 0x0F, 1);
     vga("FADT: FUNCTION FINISHED", 0x0A, 1);
     vga("================================", 0x0F, 1);
+
+
+    vga("FADT: DSDT LOAD SUCCESS", 0x0A, 1);
+    amlParseDSDT(dsdt);
 
     return fadt;
 }
