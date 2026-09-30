@@ -7,6 +7,7 @@ LOG_LINE_MAX  equ 4096
 LOG_BUF_WORDS equ 65536
 NAME_BUF_WORDS equ 128
 LINE_SCRATCH_WORDS equ 256
+AML_PKG_MAX equ 64
 
 AML_IF_OP     equ 0xA0
 AML_ELSE_OP   equ 0xA1
@@ -15,10 +16,13 @@ AML_NOOP_OP   equ 0xA3
 AML_RETURN_OP equ 0xA4
 AML_BREAK_OP  equ 0xA5
 
+%define AML_PARSE_METHOD_BODY 0
+
 section .text
 
 efiMain:
 	sub	rsp, 40
+	mov	[saved_rsp], rsp
 	mov	r12, rdx
 	mov	r13, [r12 + 64]
 
@@ -32,9 +36,7 @@ efiMain:
 	lea	r8, [console_query_cols]
 	lea	r9, [console_query_rows]
 	mov	rax, [r13 + 24]
-	sub	rsp, 40
 	call	rax
-	add	rsp, 40
 
 	test	rax, rax
 	jnz	console_rows_done
@@ -162,6 +164,9 @@ rsdp_ext_csum_done:
 
 	mov	r15, [r14 + 24]
 
+	test	r15, r15
+	jz	xsdt_invalid
+
 	cmp	dword [r15 + 0], 0x54445358
 	jne	xsdt_invalid
 
@@ -207,9 +212,13 @@ xsdt_csum_done:
 xsdt_loop:
 	mov	rax, [rbx]
 
+	test	rax, rax
+	jz	xsdt_next
+
 	cmp	dword [rax + 0], 0x50434146
 	je	facp_found
 
+xsdt_next:
 	add	rbx, 8
 	dec	r14d
 
@@ -388,6 +397,7 @@ dsdt_checksum_invalid:
 	jmp	enter_ui
 
 enter_ui:
+	mov	rsp, [saved_rsp]
 	mov	byte [ui_mode], 1
 	call	redraw_screen
 
@@ -397,9 +407,7 @@ input_loop:
 	mov	rcx, [r12 + 48]
 	lea	rdx, [key_buf]
 	mov	rax, [rcx + 8]
-	sub	rsp, 40
 	call	rax
-	add	rsp, 40
 
 	mov	[dbg_status], rax
 
@@ -454,7 +462,10 @@ scroll_down_redraw:
 	jmp	input_loop
 
 redraw_screen:
-	sub	rsp, 40
+	push	rbp
+	mov	rbp, rsp
+	sub	rsp, 32
+	and	rsp, -16
 
 	mov	rcx, r13
 	mov	rax, [r13 + 48]
@@ -465,17 +476,13 @@ redraw_screen:
 	mov	rax, [r13 + 40]
 	call	rax
 
-	add	rsp, 40
 	call	draw_banner
 	call	draw_debug_line
-	sub	rsp, 40
 
 	mov	rcx, r13
 	mov	rdx, 7
 	mov	rax, [r13 + 40]
 	call	rax
-
-	add	rsp, 40
 
 	mov	eax, [scroll_offset]
 	mov	[redraw_line], eax
@@ -497,6 +504,8 @@ redraw_loop:
 	jmp	redraw_loop
 
 redraw_done:
+	mov	rsp, rbp
+	pop	rbp
 	ret
 
 draw_banner:
@@ -565,12 +574,12 @@ dbg_out:
 
 draw_debug_line:
 	sub	rsp, 40
+
 	mov	rcx, r13
 	xor	edx, edx
 	mov	r8d, LOG_START_ROW - 1
 	mov	rax, [r13 + 56]
 	call	rax
-	add	rsp, 40
 
 	lea	rdx, [dbg_label_scan]
 	call	dbg_out
@@ -632,6 +641,7 @@ draw_debug_line:
 	lea	rdx, [debug_hex_scratch]
 	call	dbg_out
 
+	add	rsp, 40
 	ret
 
 draw_log_line:
@@ -766,7 +776,13 @@ aml_dump:
 	mov	r14, rbx
 	mov	rax, r15
 	add	rax, rbx
+	jc	aml_error_truncated
 	mov	r15, rax
+
+	mov	[aml_table_start], r14
+	mov	[aml_table_end], r15
+	mov	dword [aml_pkg_depth], 0
+	mov	byte [aml_error], 0
 
 	lea	rdx, [amlParseStart]
 	call	print_str
@@ -812,8 +828,19 @@ aml_require:
 	mov	rax, r14
 	add	rax, rcx
 	jc	aml_error_truncated
+
 	cmp	rax, r15
 	ja	aml_error_truncated
+
+	cmp	rax, [aml_table_end]
+	ja	aml_error_truncated
+
+	cmp	r14, [aml_table_start]
+	jb	aml_error_truncated
+
+	cmp	r15, [aml_table_end]
+	ja	aml_error_desync
+
 	ret
 
 aml_read_u8:
@@ -866,8 +893,8 @@ aml_read_pkg_length:
 	ret
 
 aml_pkg_multi:
-	cmp	r11d, 3
-	ja	aml_error_bad_package
+	test	r10d, 0x30
+	jnz	aml_error_bad_package
 
 	and	r10d, 0x0F
 	mov	r9d, r10d
@@ -889,7 +916,9 @@ aml_enter_package:
 	push	r14
 	call	aml_read_pkg_length
 	pop	rcx
+
 	add	rax, rcx
+	jc	aml_error_bad_package
 
 	cmp	rax, r14
 	jb	aml_error_bad_package
@@ -897,26 +926,45 @@ aml_enter_package:
 	cmp	rax, r15
 	ja	aml_error_bad_package
 
-	pop	r10
-	push	r15
+	cmp	rax, [aml_table_end]
+	ja	aml_error_bad_package
+
+	mov	edx, [aml_pkg_depth]
+	cmp	edx, AML_PKG_MAX
+	jae	aml_error_depth
+
+	lea	r10, [aml_pkg_stack]
+	mov	[r10 + rdx * 8], r15
+	inc	edx
+	mov	[aml_pkg_depth], edx
+
 	mov	r15, rax
-	jmp	r10
+	ret
 
 aml_leave_package:
 	cmp	r14, r15
+	jne	aml_error_desync
+
+	mov	edx, [aml_pkg_depth]
+	test	edx, edx
+	jz	aml_error_desync
+
+	dec	edx
+	mov	[aml_pkg_depth], edx
+
+	lea	r10, [aml_pkg_stack]
+	mov	r15, [r10 + rdx * 8]
+
+	cmp	r14, r15
 	ja	aml_error_desync
 
-	pop	r10
-	pop	r15
-	jmp	r10
+	ret
 
 aml_skip_pkg_object:
 	call	aml_enter_package
 
-	push	r15
 	lea	rdx, [aml_msg_end_eq]
 	call	print_str
-	pop	r15
 
 	mov	rdx, r15
 	mov	ecx, 16
@@ -932,12 +980,26 @@ aml_tlp_loop:
 	cmp	r14, r15
 	jae	aml_tlp_done
 
+	push	r15
+	mov	eax, [aml_pkg_depth]
+	push	rax
 	push	r14
 	call	aml_parse_one_object
 	pop	rax
+	pop	rcx
+	pop	rdx
 
 	cmp	r14, rax
 	jbe	aml_error_no_progress
+
+	cmp	r15, rdx
+	jne	aml_error_desync
+
+	cmp	ecx, [aml_pkg_depth]
+	jne	aml_error_desync
+
+	cmp	r14, r15
+	ja	aml_error_desync
 
 	call	aml_check_redraw
 
@@ -999,6 +1061,12 @@ aml_dbg_bytes_done:
 	cmp	al, 0x5B
 	je	aml_handle_ext_op
 
+	cmp	al, 0x06
+	je	aml_do_alias
+
+	cmp	al, 0x15
+	je	aml_do_external
+
 	cmp	al, 0x11
 	je	aml_do_bufferstmt
 
@@ -1041,6 +1109,27 @@ aml_handle_ext_op:
 	cmp	al, 0x81
 	je	aml_do_field
 
+	cmp	al, 0x01
+	je	aml_do_mutex
+
+	cmp	al, 0x02
+	je	aml_do_event
+
+	cmp	al, 0x83
+	je	aml_do_processor
+
+	cmp	al, 0x84
+	je	aml_do_powerresource
+
+	cmp	al, 0x85
+	je	aml_do_thermalzone
+
+	cmp	al, 0x86
+	je	aml_do_indexfield
+
+	cmp	al, 0x87
+	je	aml_do_bankfield
+
 	sub	r14, 2
 	jmp	aml_unsupported_ext_opcode
 
@@ -1074,6 +1163,115 @@ aml_do_device:
 	call	aml_term_list_parse
 
 	call	aml_leave_package
+	ret
+
+aml_do_processor:
+	call	aml_enter_package
+
+	lea	rdx, [aml_msg_processor]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_read_u8
+	call	aml_read_u32
+	call	aml_read_u8
+
+	call	aml_term_list_parse
+
+	call	aml_leave_package
+	ret
+
+aml_do_powerresource:
+	call	aml_enter_package
+
+	lea	rdx, [aml_msg_powerres]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_read_u8
+	call	aml_read_u16
+
+	call	aml_term_list_parse
+
+	call	aml_leave_package
+	ret
+
+aml_do_thermalzone:
+	call	aml_enter_package
+
+	lea	rdx, [aml_msg_thermal]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_term_list_parse
+
+	call	aml_leave_package
+	ret
+
+aml_do_alias:
+	lea	rdx, [aml_msg_alias]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	ret
+
+aml_do_external:
+	lea	rdx, [aml_msg_external]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_read_u8
+	call	aml_read_u8
+
+	ret
+
+aml_do_mutex:
+	lea	rdx, [aml_msg_mutex]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_read_u8
+
+	ret
+
+aml_do_event:
+	lea	rdx, [aml_msg_event]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
 	ret
 
 aml_do_name:
@@ -1143,7 +1341,7 @@ aml_dro_string:
 
 aml_dro_str_loop:
 	cmp	r14, r15
-	jae	aml_dro_str_done
+	jae	aml_error_truncated
 
 	movzx	eax, byte [r14]
 
@@ -1355,6 +1553,84 @@ aml_do_field:
 	lea	rdx, [newline]
 	call	print_str
 
+	call	aml_field_list_parse
+
+	call	aml_leave_package
+	ret
+
+aml_do_indexfield:
+	call	aml_enter_package
+
+	lea	rdx, [aml_msg_indexfield]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_read_u8
+
+	push	rax
+	lea	rdx, [aml_msg_flags]
+	call	print_str
+	pop	rdx
+
+	mov	ecx, 2
+	call	print_hex
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_field_list_parse
+
+	call	aml_leave_package
+	ret
+
+aml_do_bankfield:
+	call	aml_enter_package
+
+	lea	rdx, [aml_msg_bankfield]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_name_string_read
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_read_termarg_integer
+	cmp	byte [aml_error], 0
+	jne	aml_unsupported_dataobject
+
+	call	aml_read_u8
+
+	push	rax
+	lea	rdx, [aml_msg_flags]
+	call	print_str
+	pop	rdx
+
+	mov	ecx, 2
+	call	print_hex
+
+	lea	rdx, [newline]
+	call	print_str
+
+	call	aml_field_list_parse
+
+	call	aml_leave_package
+	ret
+
+aml_field_list_parse:
 	mov	dword [aml_field_bit_offset], 0
 
 aml_field_loop:
@@ -1381,19 +1657,21 @@ aml_field_reserved:
 	inc	r14
 
 	call	aml_read_pkg_length
+	mov	[aml_field_width], eax
 
-	push	rax
 	lea	rdx, [aml_msg_reserved]
 	call	print_str
-	pop	rdx
 
+	mov	edx, [aml_field_width]
 	mov	ecx, 8
 	call	print_hex
 
 	lea	rdx, [newline]
 	call	print_str
 
-	add	dword [aml_field_bit_offset], eax
+	mov	eax, [aml_field_width]
+	add	[aml_field_bit_offset], eax
+	jc	aml_error_bad_package
 
 	jmp	aml_field_loop
 
@@ -1458,19 +1736,11 @@ aml_field_connect_truncated:
 	jmp	aml_field_done
 
 aml_field_named:
-	mov	rcx, 4
-	call	aml_require
-
 	lea	rdi, [aml_name_buf]
-	mov	ecx, 4
+	lea	r11, [aml_name_buf]
+	add	r11, (NAME_BUF_WORDS - 1) * 2
 
-aml_field_nameseg_loop:
-	movzx	eax, byte [r14]
-	mov	word [rdi], ax
-	add	rdi, 2
-	inc	r14
-	dec	ecx
-	jnz	aml_field_nameseg_loop
+	call	aml_name_seg_emit
 
 	mov	word [rdi], 0
 
@@ -1485,24 +1755,25 @@ aml_field_nameseg_loop:
 	call	print_hex
 
 	call	aml_read_pkg_length
-	mov	r10d, eax
+	mov	[aml_field_width], eax
 
 	lea	rdx, [aml_msg_width]
 	call	print_str
 
-	mov	edx, eax
+	mov	edx, [aml_field_width]
 	mov	ecx, 8
 	call	print_hex
 
 	lea	rdx, [newline]
 	call	print_str
 
-	add	dword [aml_field_bit_offset], r10d
+	mov	eax, [aml_field_width]
+	add	[aml_field_bit_offset], eax
+	jc	aml_error_bad_package
 
 	jmp	aml_field_loop
 
 aml_field_done:
-	call	aml_leave_package
 	ret
 
 aml_do_if:
@@ -1607,10 +1878,8 @@ aml_do_method:
 	lea	rdx, [newline]
 	call	print_str
 
-	push	r15
 	lea	rdx, [aml_msg_bodyend]
 	call	print_str
-	pop	r15
 
 	mov	rdx, r15
 	mov	ecx, 16
@@ -1619,7 +1888,11 @@ aml_do_method:
 	lea	rdx, [newline]
 	call	print_str
 
+%if AML_PARSE_METHOD_BODY
 	call	aml_term_list_parse
+%else
+	mov	r14, r15
+%endif
 
 	call	aml_leave_package
 	ret
@@ -1652,14 +1925,14 @@ aml_ns_parent_loop:
 	inc	r14
 
 	cmp	r14, r15
-	jae	aml_ns_finish
+	jae	aml_ns_truncated
 
 	cmp	byte [r14], 0x5E
 	je	aml_ns_parent_loop
 
 aml_ns_segpath:
 	cmp	r14, r15
-	jae	aml_ns_finish
+	jae	aml_ns_truncated
 
 	movzx	eax, byte [r14]
 
@@ -1691,7 +1964,7 @@ aml_ns_multi:
 	mov	r8d, eax
 
 	test	r8d, r8d
-	jz	aml_ns_finish
+	jz	aml_error_bad_name
 
 aml_ns_multi_loop:
 	call	aml_name_seg_emit
@@ -1753,6 +2026,26 @@ aml_name_seg_emit:
 aml_nse_loop:
 	movzx	eax, byte [r14]
 
+	cmp	al, '_'
+	je	aml_nse_char_ok
+
+	cmp	al, 'A'
+	jb	aml_nse_check_digit
+
+	cmp	al, 'Z'
+	jbe	aml_nse_char_ok
+
+aml_nse_check_digit:
+	cmp	ecx, 4
+	je	aml_error_bad_name
+
+	cmp	al, '0'
+	jb	aml_error_bad_name
+
+	cmp	al, '9'
+	ja	aml_error_bad_name
+
+aml_nse_char_ok:
 	cmp	rdi, r11
 	jae	aml_nse_skip
 
@@ -1933,6 +2226,16 @@ aml_error_desync:
 
 aml_error_no_progress:
 	lea	rdx, [aml_msg_no_progress]
+	call	print_str
+	jmp	enter_ui
+
+aml_error_bad_name:
+	lea	rdx, [aml_msg_bad_name]
+	call	print_str
+	jmp	enter_ui
+
+aml_error_depth:
+	lea	rdx, [aml_msg_depth]
 	call	print_str
 	jmp	enter_ui
 
@@ -2136,6 +2439,33 @@ aml_msg_return:
 aml_msg_break:
 	dw	'B','R','E','A','K',13,10,0
 
+aml_msg_alias:
+	dw	'A','L','I','A','S',':',' ',0
+
+aml_msg_external:
+	dw	'E','X','T','E','R','N','A','L',':',' ',0
+
+aml_msg_mutex:
+	dw	'M','U','T','E','X',':',' ',0
+
+aml_msg_event:
+	dw	'E','V','E','N','T',':',' ',0
+
+aml_msg_processor:
+	dw	'P','R','O','C','E','S','S','O','R',':',' ',0
+
+aml_msg_powerres:
+	dw	'P','O','W','E','R','R','E','S','O','U','R','C','E',':',' ',0
+
+aml_msg_thermal:
+	dw	'T','H','E','R','M','A','L','Z','O','N','E',':',' ',0
+
+aml_msg_indexfield:
+	dw	'I','N','D','E','X','F','I','E','L','D',':',' ',0
+
+aml_msg_bankfield:
+	dw	'B','A','N','K','F','I','E','L','D',':',' ',0
+
 aml_msg_eq_hex:
 	dw	' ','=',' ','0','x',0
 
@@ -2229,6 +2559,12 @@ aml_msg_no_progress:
 aml_msg_truncated:
 	dw	'A','M','L',' ','E','R','R','O','R',':',' ','T','R','U','N','C','A','T','E','D',' ','/',' ','O','U','T',' ','O','F',' ','B','O','U','N','D','S',13,10,0
 
+aml_msg_bad_name:
+	dw	'A','M','L',' ','E','R','R','O','R',':',' ','I','N','V','A','L','I','D',' ','N','A','M','E','S','E','G',13,10,0
+
+aml_msg_depth:
+	dw	'A','M','L',' ','E','R','R','O','R',':',' ','P','A','C','K','A','G','E',' ','D','E','P','T','H',13,10,0
+
 section .bss
 
 lengthBuf:
@@ -2249,11 +2585,35 @@ hex_scratch:
 aml_error:
 	resb	1
 
+alignb	4
+
 aml_field_bit_offset:
 	resd	1
 
+aml_field_width:
+	resd	1
+
+aml_pkg_depth:
+	resd	1
+
+alignb	8
+
+aml_table_start:
+	resq	1
+
+aml_table_end:
+	resq	1
+
+saved_rsp:
+	resq	1
+
+aml_pkg_stack:
+	resq	AML_PKG_MAX
+
 log_buffer:
 	resw	LOG_BUF_WORDS
+
+alignb	8
 
 log_write_ptr:
 	resq	1
@@ -2273,8 +2633,12 @@ redraw_pending:
 ui_mode:
 	resb	1
 
+alignb	4
+
 visible_rows_actual:
 	resd	1
+
+alignb	8
 
 console_query_cols:
 	resq	1
@@ -2299,6 +2663,8 @@ dbg_scancode:
 
 dbg_unicode:
 	resw	1
+
+alignb	8
 
 dbg_status:
 	resq	1
