@@ -3,8 +3,8 @@ default rel
 
 LOG_START_ROW equ 11
 VISIBLE_ROWS  equ 14
-LOG_LINE_MAX  equ 4096
-LOG_BUF_WORDS equ 65536
+LOG_LINE_MAX  equ 65536
+LOG_BUF_WORDS equ 2097152
 NAME_BUF_WORDS equ 128
 LINE_SCRATCH_WORDS equ 256
 AML_PKG_MAX equ 64
@@ -17,6 +17,78 @@ AML_RETURN_OP equ 0xA4
 AML_BREAK_OP  equ 0xA5
 
 %define AML_PARSE_METHOD_BODY 0
+
+%define AML_TRACE_OPCODES   1   ; 0 = coupe les lignes "OPCODE AT:" (log beaucoup plus court)
+%define AML_LOG_FIELD_NODES 0   ; 1 = une ligne NODE: par field unit (beaucoup de lignes)
+
+; ---------------------------------------------------------------------
+;  NAMESPACE : constantes
+; ---------------------------------------------------------------------
+AML_NODE_MAX      equ 8192
+AML_SCOPE_MAX     equ 64
+AML_NODE_SIZE     equ 48
+AML_NODE_NONE     equ 0xFFFFFFFF
+AML_PATH_MAX_SEGS equ 64
+
+; offsets dans AML_NODE (48 octets)
+AN_NAME   equ 0x00      ; 4 octets : NameSeg brut
+AN_TYPE   equ 0x04      ; 1 octet  : AML_NODE_*
+AN_VKIND  equ 0x05      ; 1 octet  : AML_VK_*
+AN_AUX8   equ 0x06      ; 1 octet  : argcount / space / flags
+AN_PARENT equ 0x08      ; 4 octets : index parent
+AN_FIRST  equ 0x0C      ; 4 octets : premier enfant
+AN_NEXT   equ 0x10      ; 4 octets : frere suivant
+AN_LAST   equ 0x14      ; 4 octets : dernier enfant
+AN_VALUE  equ 0x18      ; 8 octets : valeur
+AN_AUX_A  equ 0x20      ; 8 octets : body_start / offset / bitoffset
+AN_AUX_B  equ 0x28      ; 8 octets : body_end / length / width
+
+AML_NODE_ROOT          equ 0
+AML_NODE_SCOPE         equ 1
+AML_NODE_DEVICE        equ 2
+AML_NODE_METHOD        equ 3
+AML_NODE_NAME          equ 4
+AML_NODE_OPREGION      equ 5
+AML_NODE_FIELD         equ 6
+AML_NODE_INDEXFIELD    equ 7
+AML_NODE_BANKFIELD     equ 8
+AML_NODE_PROCESSOR     equ 9
+AML_NODE_POWERRESOURCE equ 10
+AML_NODE_THERMALZONE   equ 11
+AML_NODE_MUTEX         equ 12
+AML_NODE_EVENT         equ 13
+AML_NODE_BUFFER        equ 14
+AML_NODE_PACKAGE       equ 15
+AML_NODE_VARPACKAGE    equ 16
+AML_NODE_ALIAS         equ 17
+AML_NODE_EXTERNAL      equ 18
+AML_NODE_TYPE_COUNT    equ 19
+
+AML_VK_NONE       equ 0
+AML_VK_INT        equ 1
+AML_VK_STRING     equ 2
+AML_VK_BUFFER     equ 3
+AML_VK_PACKAGE    equ 4
+AML_VK_VARPACKAGE equ 5
+
+; Emet une chaine ASCII en UTF-16 (sans terminateur)
+%macro U16 1
+%strlen %%len %1
+%assign %%k 1
+%rep %%len
+%substr %%ch %1 %%k
+	dw	%%ch
+%assign %%k %%k+1
+%endrep
+%endmacro
+
+; Entree de 32 octets (16 words) pour les tables de noms
+%macro TYPENAME 1
+%%s:
+	U16	%1
+	dw	0
+	times 32 - ($ - %%s) db 0
+%endmacro
 
 section .text
 
@@ -787,14 +859,25 @@ aml_dump:
 	lea	rdx, [amlParseStart]
 	call	print_str
 
+	call	aml_namespace_init            ; NEW : cree ROOT, affiche "NODE: ROOT \"
+
 	call	aml_check_redraw
 
 	call	aml_term_list_parse
+
+	cmp	dword [aml_scope_depth], 0    ; NEW : la pile de scopes doit etre equilibree
+	jne	aml_error_desync
+	cmp	dword [aml_current_node], 0   ; NEW : on doit etre revenu a ROOT
+	jne	aml_error_desync
 
 	lea	rdx, [amlParseDone]
 	call	print_str
 
 	call	aml_check_redraw
+
+	call	aml_namespace_dump            ; NEW : affiche l'arbre
+
+	call	aml_check_redraw              ; NEW
 
 	ret
 
@@ -1010,6 +1093,7 @@ aml_tlp_done:
 	ret
 
 aml_parse_one_object:
+%if AML_TRACE_OPCODES
 	lea	rdx, [aml_msg_opcode]
 	call	print_str
 
@@ -1046,6 +1130,7 @@ aml_dbg_next:
 aml_dbg_bytes_done:
 	lea	rdx, [newline]
 	call	print_str
+%endif
 
 	call	aml_read_u8
 
@@ -1144,8 +1229,18 @@ aml_do_scope:
 	lea	rdx, [newline]
 	call	print_str
 
+	; ---- NEW ----
+	mov	ecx, [aml_path_count]
+	call	aml_ns_walk                   ; Scope = find-or-create de tous les segments
+	mov	ecx, eax
+	lea	rdx, [aml_lbl_scope]
+	call	aml_ns_debug_node_label       ; preserve rcx
+	call	aml_scope_enter_node          ; push current; current = node
+	; ---- fin NEW ----
+
 	call	aml_term_list_parse
 
+	call	aml_scope_pop                 ; NEW
 	call	aml_leave_package
 	ret
 
@@ -1160,8 +1255,13 @@ aml_do_device:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_DEVICE          ; NEW
+	call	aml_ns_define_log             ; NEW : ecx = nouvel index
+	call	aml_scope_enter_node          ; NEW
+
 	call	aml_term_list_parse
 
+	call	aml_scope_pop                 ; NEW
 	call	aml_leave_package
 	ret
 
@@ -1176,12 +1276,17 @@ aml_do_processor:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_PROCESSOR       ; NEW
+	call	aml_ns_define_log             ; NEW
+	call	aml_scope_enter_node          ; NEW
+
 	call	aml_read_u8
 	call	aml_read_u32
 	call	aml_read_u8
 
 	call	aml_term_list_parse
 
+	call	aml_scope_pop                 ; NEW
 	call	aml_leave_package
 	ret
 
@@ -1196,11 +1301,16 @@ aml_do_powerresource:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_POWERRESOURCE   ; NEW
+	call	aml_ns_define_log             ; NEW
+	call	aml_scope_enter_node          ; NEW
+
 	call	aml_read_u8
 	call	aml_read_u16
 
 	call	aml_term_list_parse
 
+	call	aml_scope_pop                 ; NEW
 	call	aml_leave_package
 	ret
 
@@ -1215,8 +1325,13 @@ aml_do_thermalzone:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_THERMALZONE     ; NEW
+	call	aml_ns_define_log             ; NEW
+	call	aml_scope_enter_node          ; NEW
+
 	call	aml_term_list_parse
 
+	call	aml_scope_pop                 ; NEW
 	call	aml_leave_package
 	ret
 
@@ -1224,15 +1339,18 @@ aml_do_alias:
 	lea	rdx, [aml_msg_alias]
 	call	print_str
 
-	call	aml_name_string_read
+	call	aml_name_string_read          ; source
 
 	lea	rdx, [newline]
 	call	print_str
 
-	call	aml_name_string_read
+	call	aml_name_string_read          ; nouveau nom => c'est lui qu'on definit
 
 	lea	rdx, [newline]
 	call	print_str
+
+	mov	ecx, AML_NODE_ALIAS           ; NEW
+	call	aml_ns_define_log             ; NEW
 
 	ret
 
@@ -1245,7 +1363,12 @@ aml_do_external:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_EXTERNAL        ; NEW
+	call	aml_ns_define_log             ; NEW
+	mov	[aml_tmp_idx], eax            ; NEW
+
 	call	aml_read_u8
+	call	aml_ns_tmp_set8               ; NEW : type d'objet
 	call	aml_read_u8
 
 	ret
@@ -1259,7 +1382,12 @@ aml_do_mutex:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_MUTEX           ; NEW
+	call	aml_ns_define_log             ; NEW
+	mov	[aml_tmp_idx], eax            ; NEW
+
 	call	aml_read_u8
+	call	aml_ns_tmp_set8               ; NEW : sync flags
 
 	ret
 
@@ -1272,6 +1400,9 @@ aml_do_event:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_EVENT           ; NEW
+	call	aml_ns_define_log             ; NEW
+
 	ret
 
 aml_do_name:
@@ -1279,15 +1410,34 @@ aml_do_name:
 	call	print_str
 
 	call	aml_name_string_read
+
+	mov	ecx, AML_NODE_NAME            ; NEW : cree AVANT que la valeur ne reutilise le buffer
+	call	aml_ns_define                 ; NEW
+	mov	[aml_tmp_idx], eax            ; NEW
+
 	call	aml_parse_data_ref_object
+
+	; ---- NEW ----
+	mov	eax, [aml_tmp_idx]
+	call	aml_ns_node_addr
+	movzx	edx, byte [aml_last_vkind]
+	mov	[rax + AN_VKIND], dl
+	mov	rdx, [aml_last_value]
+	mov	[rax + AN_VALUE], rdx
+	; ---- fin NEW ----
 
 	lea	rdx, [newline]
 	call	print_str
+
+	mov	ecx, [aml_tmp_idx]            ; NEW
+	call	aml_ns_debug_node             ; NEW
 
 	ret
 
 aml_parse_data_ref_object:
 	mov	byte [aml_error], 0
+	mov	byte [aml_last_vkind], AML_VK_NONE     ; NEW
+	mov	qword [aml_last_value], 0              ; NEW
 
 	cmp	r14, r15
 	jae	aml_dro_truncated
@@ -1311,6 +1461,9 @@ aml_parse_data_ref_object:
 	cmp	byte [aml_error], 0
 	jne	aml_unsupported_dataobject
 
+	mov	[aml_last_value], rax                  ; NEW
+	mov	byte [aml_last_vkind], AML_VK_INT      ; NEW
+
 	push	rax
 	lea	rdx, [aml_msg_eq_hex]
 	call	print_str
@@ -1326,6 +1479,17 @@ aml_dro_truncated:
 aml_dro_skip_pkg:
 	inc	r14
 
+	mov	dl, AML_VK_BUFFER                      ; NEW (al = opcode, inchange)
+	cmp	al, 0x12
+	jne	aml_dro_k1
+	mov	dl, AML_VK_PACKAGE
+aml_dro_k1:
+	cmp	al, 0x13
+	jne	aml_dro_k2
+	mov	dl, AML_VK_VARPACKAGE
+aml_dro_k2:
+	mov	[aml_last_vkind], dl                   ; NEW
+
 	lea	rdx, [aml_msg_eq_data]
 	call	print_str
 
@@ -1334,6 +1498,7 @@ aml_dro_skip_pkg:
 
 aml_dro_string:
 	inc	r14
+	mov	byte [aml_last_vkind], AML_VK_STRING   ; NEW
 
 	lea	rdi, [aml_name_buf]
 	lea	r11, [aml_name_buf]
@@ -1405,6 +1570,9 @@ aml_buffer_body:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_BUFFER          ; NEW
+	call	aml_ns_define_anon_log        ; NEW
+
 	call	aml_leave_package
 	ret
 
@@ -1435,6 +1603,9 @@ aml_package_body:
 
 	lea	rdx, [newline]
 	call	print_str
+
+	mov	ecx, AML_NODE_PACKAGE         ; NEW
+	call	aml_ns_define_anon_log        ; NEW
 
 	call	aml_leave_package
 	ret
@@ -1472,6 +1643,9 @@ aml_varpackage_body:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_VARPACKAGE      ; NEW
+	call	aml_ns_define_anon_log        ; NEW
+
 	call	aml_leave_package
 	ret
 
@@ -1484,7 +1658,12 @@ aml_do_opregion:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_OPREGION        ; NEW
+	call	aml_ns_define                 ; NEW
+	mov	[aml_tmp_idx], eax            ; NEW
+
 	call	aml_read_u8
+	call	aml_ns_tmp_set8               ; NEW : space
 
 	push	rax
 	lea	rdx, [aml_msg_space]
@@ -1500,6 +1679,7 @@ aml_do_opregion:
 	call	aml_read_termarg_integer
 	cmp	byte [aml_error], 0
 	jne	aml_unsupported_dataobject
+	call	aml_ns_tmp_seta               ; NEW : offset
 
 	push	rax
 	lea	rdx, [aml_msg_offset]
@@ -1515,6 +1695,7 @@ aml_do_opregion:
 	call	aml_read_termarg_integer
 	cmp	byte [aml_error], 0
 	jne	aml_unsupported_dataobject
+	call	aml_ns_tmp_setb               ; NEW : length
 
 	push	rax
 	lea	rdx, [aml_msg_length]
@@ -1526,6 +1707,9 @@ aml_do_opregion:
 
 	lea	rdx, [newline]
 	call	print_str
+
+	mov	ecx, [aml_tmp_idx]            ; NEW
+	call	aml_ns_debug_node             ; NEW
 
 	ret
 
@@ -1541,6 +1725,8 @@ aml_do_field:
 	call	print_str
 
 	call	aml_read_u8
+	mov	[aml_field_flags], al                        ; NEW
+	mov	byte [aml_field_unit_type], AML_NODE_FIELD   ; NEW
 
 	push	rax
 	lea	rdx, [aml_msg_flags]
@@ -1575,6 +1761,8 @@ aml_do_indexfield:
 	call	print_str
 
 	call	aml_read_u8
+	mov	[aml_field_flags], al                             ; NEW
+	mov	byte [aml_field_unit_type], AML_NODE_INDEXFIELD   ; NEW
 
 	push	rax
 	lea	rdx, [aml_msg_flags]
@@ -1613,6 +1801,8 @@ aml_do_bankfield:
 	jne	aml_unsupported_dataobject
 
 	call	aml_read_u8
+	mov	[aml_field_flags], al                            ; NEW
+	mov	byte [aml_field_unit_type], AML_NODE_BANKFIELD   ; NEW
 
 	push	rax
 	lea	rdx, [aml_msg_flags]
@@ -1740,6 +1930,10 @@ aml_field_named:
 	lea	r11, [aml_name_buf]
 	add	r11, (NAME_BUF_WORDS - 1) * 2
 
+	mov	dword [aml_path_count], 0     ; NEW : reset du chemin structure
+	mov	dword [aml_path_up], 0        ; NEW
+	mov	byte [aml_path_root], 0       ; NEW
+
 	call	aml_name_seg_emit
 
 	mov	word [rdi], 0
@@ -1766,6 +1960,17 @@ aml_field_named:
 
 	lea	rdx, [newline]
 	call	print_str
+
+	; ---- NEW : un node par field unit ----
+	movzx	ecx, byte [aml_field_unit_type]
+	call	aml_ns_define
+	mov	[aml_tmp_idx], eax
+	call	aml_ns_field_unit_fill
+%if AML_LOG_FIELD_NODES
+	mov	ecx, [aml_tmp_idx]
+	call	aml_ns_debug_node
+%endif
+	; ---- fin NEW ----
 
 	mov	eax, [aml_field_width]
 	add	[aml_field_bit_offset], eax
@@ -1864,8 +2069,25 @@ aml_do_method:
 	lea	rdx, [newline]
 	call	print_str
 
+	mov	ecx, AML_NODE_METHOD          ; NEW
+	call	aml_ns_define_log             ; NEW
+	mov	[aml_tmp_idx], eax            ; NEW
+
 	call	aml_read_u8
-	and	eax, 0x07
+
+	; ---- NEW (remplace "and eax, 0x07") ----
+	push	rax                           ; flags bruts
+	mov	eax, [aml_tmp_idx]
+	call	aml_ns_node_addr
+	pop	rcx
+	mov	[rax + AN_VALUE], rcx         ; flags complets
+	mov	edx, ecx
+	and	edx, 0x07
+	mov	[rax + AN_AUX8], dl           ; argcount
+	mov	[rax + AN_AUX_A], r14         ; body_start
+	mov	[rax + AN_AUX_B], r15         ; body_end
+	mov	eax, edx                      ; eax = argcount, comme avant
+	; ---- fin NEW ----
 
 	push	rax
 	lea	rdx, [aml_msg_argcount]
@@ -1889,7 +2111,10 @@ aml_do_method:
 	call	print_str
 
 %if AML_PARSE_METHOD_BODY
+	mov	ecx, [aml_tmp_idx]            ; NEW : le body vit dans le scope du METHOD
+	call	aml_scope_enter_node
 	call	aml_term_list_parse
+	call	aml_scope_pop
 %else
 	mov	r14, r15
 %endif
@@ -1900,6 +2125,10 @@ aml_do_method:
 aml_name_string_read:
 	push	rdi
 	push	r11
+
+	mov	dword [aml_path_count], 0     ; NEW
+	mov	dword [aml_path_up], 0        ; NEW
+	mov	byte [aml_path_root], 0       ; NEW
 
 	lea	rdi, [aml_name_buf]
 	lea	r11, [aml_name_buf]
@@ -1912,6 +2141,7 @@ aml_name_string_read:
 	jne	aml_ns_check_parent
 
 	call	aml_ns_emit_lit_bs
+	mov	byte [aml_path_root], 1       ; NEW
 	inc	r14
 
 	jmp	aml_ns_segpath
@@ -1922,6 +2152,7 @@ aml_ns_check_parent:
 
 aml_ns_parent_loop:
 	call	aml_ns_emit_lit_caret
+	inc	dword [aml_path_up]           ; NEW
 	inc	r14
 
 	cmp	r14, r15
@@ -2020,6 +2251,19 @@ aml_ns_lit_skip3:
 aml_name_seg_emit:
 	mov	rcx, 4
 	call	aml_require
+
+	; ---- NEW: copie brute du segment dans aml_path_segs ----
+	push	rsi
+	mov	eax, [aml_path_count]
+	cmp	eax, AML_PATH_MAX_SEGS
+	jae	aml_error_bad_name
+	mov	edx, [r14]
+	lea	rsi, [aml_path_segs]
+	mov	[rsi + rax*4], edx
+	inc	eax
+	mov	[aml_path_count], eax
+	pop	rsi
+	; ---- fin NEW ----
 
 	mov	ecx, 4
 
@@ -2132,6 +2376,556 @@ aml_ti_qword:
 	call	aml_read_u64
 	ret
 
+; =====================================================================
+;  NAMESPACE : primitives
+; =====================================================================
+
+; ecx = type, rsi = ptr 4 octets (ou 0) -> eax = index, rdi = adresse
+; clobber: rdx. Erreur: NAMESPACE FULL
+aml_namespace_alloc_node:
+	mov	eax, [aml_node_count]
+	cmp	eax, AML_NODE_MAX
+	jae	aml_error_ns_full
+	lea	edx, [rax + 1]
+	mov	[aml_node_count], edx
+	mov	edi, eax
+	lea	rdi, [rdi + rdi*2]
+	shl	rdi, 4
+	lea	rdx, [aml_nodes]
+	add	rdi, rdx
+	mov	qword [rdi + 0], 0
+	mov	qword [rdi + 8], -1          ; parent=NONE, first=NONE
+	mov	qword [rdi + 16], -1         ; next=NONE,   last=NONE
+	mov	qword [rdi + 24], 0
+	mov	qword [rdi + 32], 0
+	mov	qword [rdi + 40], 0
+	mov	[rdi + AN_TYPE], cl
+	test	rsi, rsi
+	jz	aml_nsan_noname
+	mov	edx, [rsi]
+	mov	[rdi + AN_NAME], edx
+aml_nsan_noname:
+	ret
+
+; eax = index -> rax = adresse. Valide l'index. clobber: rdx
+aml_ns_node_addr:
+	cmp	eax, [aml_node_count]
+	jae	aml_error_invalid_node
+	mov	eax, eax
+	lea	rax, [rax + rax*2]
+	shl	rax, 4
+	lea	rdx, [aml_nodes]
+	add	rax, rdx
+	ret
+
+; ecx = parent, edx = child. clobber: rax, rsi, r10, r11
+aml_namespace_attach_child:
+	cmp	ecx, edx
+	je	aml_error_invalid_node
+	mov	r10d, ecx
+	mov	r11d, edx
+	mov	eax, r10d
+	call	aml_ns_node_addr
+	mov	rsi, rax                      ; rsi = parent
+	mov	eax, r11d
+	call	aml_ns_node_addr
+	mov	[rax + AN_PARENT], r10d
+	mov	dword [rax + AN_NEXT], AML_NODE_NONE
+	mov	eax, [rsi + AN_LAST]
+	cmp	eax, AML_NODE_NONE
+	jne	aml_nsac_tail
+	mov	[rsi + AN_FIRST], r11d
+	mov	[rsi + AN_LAST], r11d
+	ret
+aml_nsac_tail:
+	call	aml_ns_node_addr              ; eax = ancien dernier
+	mov	[rax + AN_NEXT], r11d
+	mov	[rsi + AN_LAST], r11d
+	ret
+
+; ecx = parent, rsi = ptr nom (4 octets) -> eax = index ou NONE
+; clobber: rdx, r8, r9, r10
+aml_ns_lookup_child:
+	mov	r8d, [rsi]
+	mov	r10d, [aml_node_count]
+	mov	eax, ecx
+	call	aml_ns_node_addr
+	mov	eax, [rax + AN_FIRST]
+aml_nslc_loop:
+	cmp	eax, AML_NODE_NONE
+	je	aml_nslc_done
+	sub	r10d, 1
+	jc	aml_error_invalid_node        ; boucle/corruption
+	mov	r9d, eax
+	call	aml_ns_node_addr
+	cmp	[rax + AN_NAME], r8d
+	je	aml_nslc_found
+	mov	eax, [rax + AN_NEXT]
+	jmp	aml_nslc_loop
+aml_nslc_found:
+	mov	eax, r9d
+aml_nslc_done:
+	ret
+
+; ecx = parent, rsi = ptr nom, edx = type si creation -> eax = index
+aml_ns_find_or_create:
+	push	rcx
+	push	rdx
+	push	rsi
+	call	aml_ns_lookup_child
+	pop	rsi
+	pop	rdx
+	pop	rcx
+	cmp	eax, AML_NODE_NONE
+	jne	aml_nsfc_ret
+	mov	r8d, ecx
+	mov	ecx, edx
+	call	aml_namespace_alloc_node
+	mov	r9d, eax
+	mov	ecx, r8d
+	mov	edx, eax
+	call	aml_namespace_attach_child
+	mov	eax, r9d
+aml_nsfc_ret:
+	ret
+
+; -> eax = node de depart selon aml_path_root / aml_path_up / aml_current_node
+aml_ns_resolve_start:
+	cmp	byte [aml_path_root], 0
+	je	aml_nsrs_rel
+	xor	eax, eax                      ; "\" => root
+	ret
+aml_nsrs_rel:
+	mov	eax, [aml_current_node]
+	mov	ecx, [aml_path_up]
+aml_nsrs_up:
+	test	ecx, ecx
+	jz	aml_nsrs_done
+	test	eax, eax
+	jz	aml_error_invalid_node        ; ^ au-dessus de root
+	push	rcx
+	call	aml_ns_node_addr
+	pop	rcx
+	mov	eax, [rax + AN_PARENT]
+	dec	ecx
+	jmp	aml_nsrs_up
+aml_nsrs_done:
+	ret
+
+; ecx = N : descend les N premiers segments du chemin courant
+; (find-or-create de type SCOPE) -> eax = node
+aml_ns_walk:
+	mov	[aml_walk_n], ecx
+	mov	dword [aml_walk_i], 0
+	call	aml_ns_resolve_start
+	mov	[aml_walk_node], eax
+aml_nsw_loop:
+	mov	eax, [aml_walk_i]
+	cmp	eax, [aml_walk_n]
+	jae	aml_nsw_done
+	lea	rsi, [aml_path_segs]
+	lea	rsi, [rsi + rax*4]
+	mov	ecx, [aml_walk_node]
+	mov	edx, AML_NODE_SCOPE
+	call	aml_ns_find_or_create
+	mov	[aml_walk_node], eax
+	inc	dword [aml_walk_i]
+	jmp	aml_nsw_loop
+aml_nsw_done:
+	mov	eax, [aml_walk_node]
+	ret
+
+; ecx = type : cree un node DEFINI par le chemin courant -> eax = index
+aml_ns_define:
+	push	rcx
+	mov	ecx, [aml_path_count]
+	test	ecx, ecx
+	jz	aml_error_bad_name            ; NullName ne peut pas definir un objet
+	dec	ecx
+	call	aml_ns_walk
+	mov	[aml_def_parent], eax
+	mov	eax, [aml_path_count]
+	dec	eax
+	lea	rsi, [aml_path_segs]
+	lea	rsi, [rsi + rax*4]
+	pop	rcx
+	call	aml_namespace_alloc_node
+	mov	[aml_def_idx], eax
+	mov	ecx, [aml_def_parent]
+	mov	edx, eax
+	call	aml_namespace_attach_child
+	mov	eax, [aml_def_idx]
+	ret
+
+; ecx = type -> eax = ecx = index (+ ligne NODE:)
+aml_ns_define_log:
+	call	aml_ns_define
+	mov	ecx, eax
+	call	aml_ns_debug_node
+	mov	eax, ecx
+	ret
+
+; ecx = type : node anonyme (Buffer/Package orphelins) sous le scope courant
+aml_ns_define_anon_log:
+	xor	esi, esi
+	call	aml_namespace_alloc_node
+	mov	[aml_def_idx], eax
+	mov	ecx, [aml_current_node]
+	mov	edx, eax
+	call	aml_namespace_attach_child
+	mov	ecx, [aml_def_idx]
+	call	aml_ns_debug_node
+	ret
+
+; ---------------- pile de scopes (distincte de aml_pkg_stack) ---------
+aml_scope_push:                       ; empile aml_current_node
+	mov	edx, [aml_scope_depth]
+	cmp	edx, AML_SCOPE_MAX
+	jae	aml_error_scope_ovf
+	lea	r10, [aml_scope_stack]
+	mov	eax, [aml_current_node]
+	mov	[r10 + rdx*4], eax
+	inc	edx
+	mov	[aml_scope_depth], edx
+	ret
+
+aml_scope_pop:                        ; current = depile
+	mov	edx, [aml_scope_depth]
+	test	edx, edx
+	jz	aml_error_scope_unf
+	dec	edx
+	mov	[aml_scope_depth], edx
+	lea	r10, [aml_scope_stack]
+	mov	eax, [r10 + rdx*4]
+	cmp	eax, [aml_node_count]
+	jae	aml_error_invalid_node
+	mov	[aml_current_node], eax
+	ret
+
+aml_scope_enter_node:                 ; ecx = node : push current; current = ecx
+	cmp	ecx, [aml_node_count]
+	jae	aml_error_invalid_node
+	call	aml_scope_push
+	mov	[aml_current_node], ecx
+	ret
+
+; ---------------- init ------------------------------------------------
+aml_namespace_init:
+	mov	dword [aml_node_count], 0
+	mov	dword [aml_scope_depth], 0
+	mov	dword [aml_current_node], 0
+	mov	dword [aml_path_count], 0
+	mov	dword [aml_path_up], 0
+	mov	byte [aml_path_root], 0
+	mov	ecx, AML_NODE_ROOT
+	lea	rsi, [aml_root_name]
+	call	aml_namespace_alloc_node
+	test	eax, eax
+	jnz	aml_error_invalid_node        ; root DOIT etre l'index 0
+	mov	[aml_current_node], eax
+	mov	ecx, eax
+	call	aml_ns_debug_node
+	ret
+
+; ---------------- setters sur le node [aml_tmp_idx] -------------------
+; (preservent rax et rdx)
+aml_ns_tmp_set8:
+	push	rax
+	push	rdx
+	mov	eax, [aml_tmp_idx]
+	call	aml_ns_node_addr
+	mov	rdx, [rsp + 8]
+	mov	[rax + AN_AUX8], dl
+	pop	rdx
+	pop	rax
+	ret
+
+aml_ns_tmp_seta:
+	push	rax
+	push	rdx
+	mov	eax, [aml_tmp_idx]
+	call	aml_ns_node_addr
+	mov	rdx, [rsp + 8]
+	mov	[rax + AN_AUX_A], rdx
+	pop	rdx
+	pop	rax
+	ret
+
+aml_ns_tmp_setb:
+	push	rax
+	push	rdx
+	mov	eax, [aml_tmp_idx]
+	call	aml_ns_node_addr
+	mov	rdx, [rsp + 8]
+	mov	[rax + AN_AUX_B], rdx
+	pop	rdx
+	pop	rax
+	ret
+
+aml_ns_field_unit_fill:
+	mov	eax, [aml_tmp_idx]
+	call	aml_ns_node_addr
+	mov	edx, [aml_field_bit_offset]
+	mov	[rax + AN_AUX_A], rdx
+	mov	edx, [aml_field_width]
+	mov	[rax + AN_AUX_B], rdx
+	movzx	edx, byte [aml_field_flags]
+	mov	[rax + AN_AUX8], dl
+	ret
+
+; =====================================================================
+;  DEBUG : "NODE: TYPE \chemin [= valeur]"
+; =====================================================================
+
+; eax = index -> aml_path_buf = "\_SB_.PCI0" (UTF-16). clobber: rcx, rdx, rsi, rdi, r8, r9
+aml_ns_build_path:
+	xor	ecx, ecx
+aml_nsbp_collect:
+	cmp	ecx, 128
+	jae	aml_error_invalid_node
+	lea	rdx, [aml_pathtmp]
+	mov	[rdx + rcx*4], eax
+	inc	ecx
+	test	eax, eax
+	jz	aml_nsbp_emit
+	push	rcx
+	call	aml_ns_node_addr
+	pop	rcx
+	mov	eax, [rax + AN_PARENT]
+	jmp	aml_nsbp_collect
+
+aml_nsbp_emit:
+	lea	rdi, [aml_path_buf]
+	mov	word [rdi], '\'
+	add	rdi, 2
+	dec	ecx                           ; saute root (dernier collecte)
+	mov	r9d, 1                        ; "premier segment" => pas de '.'
+aml_nsbp_node:
+	test	ecx, ecx
+	jz	aml_nsbp_done
+	dec	ecx
+	lea	rdx, [aml_pathtmp]
+	mov	eax, [rdx + rcx*4]
+	push	rcx
+	call	aml_ns_node_addr
+	pop	rcx
+	mov	esi, [rax + AN_NAME]
+	test	r9d, r9d
+	jnz	aml_nsbp_nosep
+	mov	word [rdi], '.'
+	add	rdi, 2
+aml_nsbp_nosep:
+	xor	r9d, r9d
+	test	esi, esi
+	jnz	aml_nsbp_chars
+	mov	word [rdi + 0], '<'
+	mov	word [rdi + 2], 'a'
+	mov	word [rdi + 4], 'n'
+	mov	word [rdi + 6], 'o'
+	mov	word [rdi + 8], 'n'
+	mov	word [rdi + 10], '>'
+	add	rdi, 12
+	jmp	aml_nsbp_node
+aml_nsbp_chars:
+	mov	r8d, 4
+aml_nsbp_ch:
+	mov	eax, esi
+	and	eax, 0xFF
+	mov	[rdi], ax
+	add	rdi, 2
+	shr	esi, 8
+	dec	r8d
+	jnz	aml_nsbp_ch
+	jmp	aml_nsbp_node
+aml_nsbp_done:
+	mov	word [rdi], 0
+	ret
+
+; rax = adresse node : affiche " = 0x..." pour NAME, " = <buffer>" etc.
+aml_ns_print_value:
+	movzx	edx, byte [rax + AN_VKIND]
+	test	edx, edx
+	jz	aml_npv_ret
+	cmp	edx, AML_VK_INT
+	je	aml_npv_int
+	cmp	edx, AML_VK_VARPACKAGE
+	ja	aml_npv_ret
+	shl	edx, 5
+	lea	rcx, [aml_vk_names]
+	add	rdx, rcx
+	call	print_str
+aml_npv_ret:
+	ret
+aml_npv_int:
+	push	rax
+	lea	rdx, [aml_nd_eq]
+	call	print_str
+	pop	rax
+	mov	rdx, [rax + AN_VALUE]
+	mov	ecx, 8
+	mov	rax, rdx
+	shr	rax, 32
+	jz	aml_npv_w
+	mov	ecx, 16
+aml_npv_w:
+	call	print_hex
+	ret
+
+; ecx = index, rdx = label UTF-16. Preserve rcx.
+aml_ns_debug_node_label:
+	push	rcx
+	push	rdx
+	lea	rdx, [aml_nd_prefix]
+	call	print_str
+	pop	rdx
+	call	print_str
+	lea	rdx, [aml_nd_space]
+	call	print_str
+	mov	eax, [rsp]
+	call	aml_ns_build_path
+	lea	rdx, [aml_path_buf]
+	call	print_str
+	mov	eax, [rsp]
+	call	aml_ns_node_addr
+	cmp	byte [rax + AN_TYPE], AML_NODE_NAME
+	jne	aml_ndl_nl
+	call	aml_ns_print_value
+aml_ndl_nl:
+	lea	rdx, [newline]
+	call	print_str
+	pop	rcx
+	ret
+
+; ecx = index : le label est le nom du type du node. Preserve rcx.
+aml_ns_debug_node:
+	push	rcx
+	mov	eax, ecx
+	call	aml_ns_node_addr
+	movzx	eax, byte [rax + AN_TYPE]
+	cmp	eax, AML_NODE_TYPE_COUNT
+	jae	aml_error_invalid_node
+	shl	eax, 5
+	lea	rdx, [aml_type_names]
+	add	rdx, rax
+	pop	rcx
+	jmp	aml_ns_debug_node_label
+
+; =====================================================================
+;  DUMP de l'arbre (iteratif : pas de recursion, pas de pile CPU)
+;  Parcours preordre via first_child / next_sibling / parent.
+; =====================================================================
+aml_namespace_dump:
+	lea	rdx, [aml_msg_ns_hdr]
+	call	print_str
+	cmp	dword [aml_node_count], 0
+	je	aml_error_invalid_node
+	mov	dword [aml_dump_node], 0
+	mov	dword [aml_dump_depth], 0
+	mov	dword [aml_dump_steps], 0
+
+aml_nsd_visit:
+	mov	eax, [aml_dump_steps]
+	inc	eax
+	mov	[aml_dump_steps], eax
+	cmp	eax, [aml_node_count]
+	ja	aml_error_invalid_node        ; plus de visites que de nodes => cycle
+
+	call	aml_ns_dump_line
+
+	mov	eax, [aml_dump_node]
+	call	aml_ns_node_addr
+	mov	eax, [rax + AN_FIRST]
+	cmp	eax, AML_NODE_NONE
+	je	aml_nsd_up
+	mov	[aml_dump_node], eax
+	inc	dword [aml_dump_depth]
+	jmp	aml_nsd_visit
+
+aml_nsd_up:
+	mov	eax, [aml_dump_node]
+	test	eax, eax
+	jz	aml_nsd_done                  ; on est remonte jusqu'a root
+	call	aml_ns_node_addr
+	mov	edx, [rax + AN_NEXT]
+	cmp	edx, AML_NODE_NONE
+	jne	aml_nsd_sibling
+	mov	eax, [rax + AN_PARENT]
+	mov	[aml_dump_node], eax
+	dec	dword [aml_dump_depth]
+	jmp	aml_nsd_up
+aml_nsd_sibling:
+	mov	[aml_dump_node], edx
+	jmp	aml_nsd_visit
+aml_nsd_done:
+	ret
+
+; affiche le node [aml_dump_node] avec indentation [aml_dump_depth]
+aml_ns_dump_line:
+	lea	rdi, [aml_path_buf]
+	mov	ecx, [aml_dump_depth]
+	cmp	ecx, 60
+	jbe	aml_nsdl_indent
+	mov	ecx, 60
+aml_nsdl_indent:
+	add	ecx, ecx
+	jz	aml_nsdl_name
+aml_nsdl_sp:
+	mov	word [rdi], ' '
+	add	rdi, 2
+	dec	ecx
+	jnz	aml_nsdl_sp
+aml_nsdl_name:
+	mov	eax, [aml_dump_node]
+	call	aml_ns_node_addr
+	mov	esi, [rax + AN_NAME]
+	movzx	r9d, byte [rax + AN_TYPE]
+	cmp	r9d, AML_NODE_TYPE_COUNT
+	jae	aml_error_invalid_node
+	test	esi, esi
+	jnz	aml_nsdl_chars
+	mov	word [rdi + 0], '<'
+	mov	word [rdi + 2], 'a'
+	mov	word [rdi + 4], 'n'
+	mov	word [rdi + 6], 'o'
+	mov	word [rdi + 8], 'n'
+	mov	word [rdi + 10], '>'
+	add	rdi, 12
+	jmp	aml_nsdl_after
+aml_nsdl_chars:
+	mov	r8d, 4
+aml_nsdl_ch:
+	mov	eax, esi
+	and	eax, 0xFF
+	jz	aml_nsdl_after                ; root = "\" puis zeros
+	mov	[rdi], ax
+	add	rdi, 2
+	shr	esi, 8
+	dec	r8d
+	jnz	aml_nsdl_ch
+aml_nsdl_after:
+	mov	word [rdi + 0], ' '
+	mov	word [rdi + 2], '['
+	add	rdi, 4
+	shl	r9d, 5
+	lea	rdx, [aml_type_names]
+	add	rdx, r9
+aml_nsdl_tn:
+	movzx	eax, word [rdx]
+	test	eax, eax
+	jz	aml_nsdl_tn_done
+	mov	[rdi], ax
+	add	rdi, 2
+	add	rdx, 2
+	jmp	aml_nsdl_tn
+aml_nsdl_tn_done:
+	mov	word [rdi + 0], ']'
+	mov	word [rdi + 2], 13
+	mov	word [rdi + 4], 10
+	mov	word [rdi + 6], 0
+	lea	rdx, [aml_path_buf]
+	call	print_str
+	ret
+
 print_str:
 	push	rsi
 	push	rdi
@@ -2236,6 +3030,26 @@ aml_error_bad_name:
 
 aml_error_depth:
 	lea	rdx, [aml_msg_depth]
+	call	print_str
+	jmp	enter_ui
+
+aml_error_ns_full:
+	lea	rdx, [aml_msg_ns_full]
+	call	print_str
+	jmp	enter_ui
+
+aml_error_scope_ovf:
+	lea	rdx, [aml_msg_scope_ovf]
+	call	print_str
+	jmp	enter_ui
+
+aml_error_scope_unf:
+	lea	rdx, [aml_msg_scope_unf]
+	call	print_str
+	jmp	enter_ui
+
+aml_error_invalid_node:
+	lea	rdx, [aml_msg_invalid_node]
 	call	print_str
 	jmp	enter_ui
 
@@ -2565,6 +3379,69 @@ aml_msg_bad_name:
 aml_msg_depth:
 	dw	'A','M','L',' ','E','R','R','O','R',':',' ','P','A','C','K','A','G','E',' ','D','E','P','T','H',13,10,0
 
+; ---------------------------------------------------------------------
+;  NAMESPACE : donnees
+; ---------------------------------------------------------------------
+aml_root_name:
+	db	'\', 0, 0, 0
+
+aml_type_names:               ; DOIT suivre l'ordre des AML_NODE_*
+	TYPENAME "ROOT"
+	TYPENAME "SCOPE"
+	TYPENAME "DEVICE"
+	TYPENAME "METHOD"
+	TYPENAME "NAME"
+	TYPENAME "OPREGION"
+	TYPENAME "FIELD"
+	TYPENAME "INDEXFIELD"
+	TYPENAME "BANKFIELD"
+	TYPENAME "PROCESSOR"
+	TYPENAME "POWERRESOURCE"
+	TYPENAME "THERMALZONE"
+	TYPENAME "MUTEX"
+	TYPENAME "EVENT"
+	TYPENAME "BUFFER"
+	TYPENAME "PACKAGE"
+	TYPENAME "VARPACKAGE"
+	TYPENAME "ALIAS"
+	TYPENAME "EXTERNAL"
+
+aml_vk_names:                 ; ordre AML_VK_*
+	TYPENAME ""
+	TYPENAME ""
+	TYPENAME " = <string>"
+	TYPENAME " = <buffer>"
+	TYPENAME " = <package>"
+	TYPENAME " = <varpackage>"
+
+aml_lbl_scope:
+	U16 "SCOPE"
+	dw 0
+aml_nd_prefix:
+	U16 "NODE: "
+	dw 0
+aml_nd_space:
+	dw ' ', 0
+aml_nd_eq:
+	U16 " = "
+	dw 0
+aml_msg_ns_hdr:
+	dw 13,10
+	U16 "ACPI NAMESPACE"
+	dw 13,10,13,10,0
+aml_msg_ns_full:
+	U16 "AML ERROR: NAMESPACE FULL"
+	dw 13,10,0
+aml_msg_scope_ovf:
+	U16 "AML ERROR: SCOPE STACK OVERFLOW"
+	dw 13,10,0
+aml_msg_scope_unf:
+	U16 "AML ERROR: SCOPE STACK UNDERFLOW"
+	dw 13,10,0
+aml_msg_invalid_node:
+	U16 "AML ERROR: INVALID NODE"
+	dw 13,10,0
+
 section .bss
 
 lengthBuf:
@@ -2609,6 +3486,37 @@ saved_rsp:
 
 aml_pkg_stack:
 	resq	AML_PKG_MAX
+
+; ---------------------------------------------------------------------
+;  NAMESPACE : BSS
+; ---------------------------------------------------------------------
+alignb	4
+aml_node_count:      resd 1
+aml_current_node:    resd 1
+aml_scope_depth:     resd 1
+aml_path_count:      resd 1
+aml_path_up:         resd 1
+aml_walk_n:          resd 1
+aml_walk_i:          resd 1
+aml_walk_node:       resd 1
+aml_def_parent:      resd 1
+aml_def_idx:         resd 1
+aml_tmp_idx:         resd 1
+aml_dump_node:       resd 1
+aml_dump_depth:      resd 1
+aml_dump_steps:      resd 1
+aml_path_root:       resb 1
+aml_last_vkind:      resb 1
+aml_field_flags:     resb 1
+aml_field_unit_type: resb 1
+alignb	8
+aml_last_value:      resq 1
+aml_scope_stack:     resd AML_SCOPE_MAX        ; pile des scopes (independante de aml_pkg_stack)
+aml_path_segs:       resd AML_PATH_MAX_SEGS    ; 4 octets bruts par segment
+aml_pathtmp:         resd 128
+aml_path_buf:        resw 1024
+alignb	8
+aml_nodes:           resb AML_NODE_SIZE * AML_NODE_MAX
 
 log_buffer:
 	resw	LOG_BUF_WORDS
@@ -2674,3 +3582,4 @@ debug_hex_scratch:
 
 line_scratch:
 	resw	LINE_SCRATCH_WORDS
+	
