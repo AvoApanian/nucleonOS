@@ -3,8 +3,8 @@ default rel
 
 LOG_START_ROW equ 11
 VISIBLE_ROWS  equ 14
-LOG_LINE_MAX  equ 65536
-LOG_BUF_WORDS equ 2097152
+LOG_LINE_MAX  equ 131072
+LOG_BUF_WORDS equ 4194304
 NAME_BUF_WORDS equ 128
 LINE_SCRATCH_WORDS equ 256
 AML_PKG_MAX equ 64
@@ -18,13 +18,15 @@ AML_BREAK_OP  equ 0xA5
 
 %define AML_PARSE_METHOD_BODY 0
 
-%define AML_TRACE_OPCODES   1   ; 0 = coupe les lignes "OPCODE AT:" (log beaucoup plus court)
-%define AML_LOG_FIELD_NODES 0   ; 1 = une ligne NODE: par field unit (beaucoup de lignes)
+%define AML_TRACE_OPCODES   0   ; 1 = lignes "OPCODE AT:" (log ENORME sur un vrai DSDT)
+%define AML_EXTERNAL_CREATES_NODE 0   ; 0 = External() est une declaration: pas de node
+%define AML_LOG_FIELD_NODES 0
+AML_REDRAW_MASK   equ 0x3FF            ; redessine l'ecran 1 fois sur 1024 pendant le parse   ; 1 = une ligne NODE: par field unit (beaucoup de lignes)
 
 ; ---------------------------------------------------------------------
 ;  NAMESPACE : constantes
 ; ---------------------------------------------------------------------
-AML_NODE_MAX      equ 8192
+AML_NODE_MAX      equ 32768
 AML_SCOPE_MAX     equ 64
 AML_NODE_SIZE     equ 48
 AML_NODE_NONE     equ 0xFFFFFFFF
@@ -97,6 +99,16 @@ efiMain:
 	mov	[saved_rsp], rsp
 	mov	r12, rdx
 	mov	r13, [r12 + 64]
+
+	; ---- NEW : desactive le watchdog UEFI (reset auto apres ~5 min) ----
+	; BootServices = SystemTable+96 ; SetWatchdogTimer = BootServices+256
+	mov	rax, [r12 + 96]
+	xor	ecx, ecx
+	xor	edx, edx
+	xor	r8d, r8d
+	xor	r9d, r9d
+	call	[rax + 256]
+	; ---- fin NEW ----
 
 	mov	dword [visible_rows_actual], VISIBLE_ROWS
 
@@ -470,6 +482,27 @@ dsdt_checksum_invalid:
 
 enter_ui:
 	mov	rsp, [saved_rsp]
+
+	; ---- NEW : erreur pendant le parse => rapport + arbre PARTIEL ----
+	cmp	byte [aml_dump_done], 0
+	jne	enter_ui_view
+	cmp	dword [aml_node_count], 0
+	je	enter_ui_view
+	call	aml_print_stop_line
+	call	aml_namespace_dump
+	call	aml_print_stop_line
+enter_ui_view:
+	; se placer sur la fin du log
+	mov	eax, [log_line_total]
+	cmp	eax, [visible_rows_actual]
+	jbe	enter_ui_top
+	sub	eax, [visible_rows_actual]
+	mov	[scroll_offset], eax
+	jmp	enter_ui_draw
+enter_ui_top:
+	mov	dword [scroll_offset], 0
+enter_ui_draw:
+	; ---- fin NEW ----
 	mov	byte [ui_mode], 1
 	call	redraw_screen
 
@@ -504,6 +537,15 @@ input_loop:
 	cmp	eax, 0x53
 	je	scroll_down
 
+	cmp	cx, 0x09                      ; NEW : PageUp
+	je	scroll_pgup
+	cmp	cx, 0x0A                      ; NEW : PageDown
+	je	scroll_pgdn
+	cmp	cx, 0x05                      ; NEW : Home
+	je	scroll_home
+	cmp	cx, 0x06                      ; NEW : End
+	je	scroll_end
+
 	call	redraw_screen
 	jmp	input_loop
 
@@ -530,6 +572,47 @@ scroll_down:
 	inc	dword [scroll_offset]
 
 scroll_down_redraw:
+	call	redraw_screen
+	jmp	input_loop
+
+scroll_pgup:
+	mov	eax, [scroll_offset]
+	sub	eax, [visible_rows_actual]
+	jae	scroll_pgup_set
+	xor	eax, eax
+scroll_pgup_set:
+	mov	[scroll_offset], eax
+	call	redraw_screen
+	jmp	input_loop
+
+scroll_pgdn:
+	mov	eax, [scroll_offset]
+	add	eax, [visible_rows_actual]
+	mov	edx, [log_line_total]
+	sub	edx, [visible_rows_actual]
+	jae	scroll_pgdn_max
+	xor	edx, edx
+scroll_pgdn_max:
+	cmp	eax, edx
+	jbe	scroll_pgdn_set
+	mov	eax, edx
+scroll_pgdn_set:
+	mov	[scroll_offset], eax
+	call	redraw_screen
+	jmp	input_loop
+
+scroll_home:
+	mov	dword [scroll_offset], 0
+	call	redraw_screen
+	jmp	input_loop
+
+scroll_end:
+	mov	eax, [log_line_total]
+	sub	eax, [visible_rows_actual]
+	jae	scroll_end_set
+	xor	eax, eax
+scroll_end_set:
+	mov	[scroll_offset], eax
 	call	redraw_screen
 	jmp	input_loop
 
@@ -873,7 +956,7 @@ aml_dump:
 	lea	rdx, [amlParseDone]
 	call	print_str
 
-	call	aml_check_redraw
+	call	aml_check_redraw_force
 
 	call	aml_namespace_dump            ; NEW : affiche l'arbre
 
@@ -881,10 +964,23 @@ aml_dump:
 
 	ret
 
+aml_check_redraw_force:                ; NEW : redessine a coup sur
+	mov	dword [aml_redraw_tick], AML_REDRAW_MASK
+	jmp	aml_check_redraw
+
 aml_check_redraw:
 	cmp	byte [redraw_pending], 0
 	je	aml_check_redraw_done
 
+	; ---- NEW : pendant le parse, ne redessine que 1 appel sur 1024 ----
+	cmp	byte [ui_mode], 0
+	jne	aml_check_redraw_run
+	inc	dword [aml_redraw_tick]
+	test	dword [aml_redraw_tick], AML_REDRAW_MASK
+	jnz	aml_check_redraw_done
+	; ---- fin NEW ----
+
+aml_check_redraw_run:
 	mov	byte [redraw_pending], 0
 
 	cmp	byte [ui_mode], 0
@@ -1179,8 +1275,30 @@ aml_dbg_bytes_done:
 	cmp	al, AML_BREAK_OP
 	je	aml_do_break
 
+	; ---- NEW : constantes isolees (Zero/One/Ones) entre deux declarations.
+	;      Observe sur le vrai DSDT ASUS : octet 0x01 entre deux External.
+	cmp	al, 0x00
+	je	aml_do_const
+	cmp	al, 0x01
+	je	aml_do_const
+	cmp	al, 0xFF
+	je	aml_do_const
+	; ---- fin NEW ----
+
 	dec	r14
 	jmp	aml_unsupported_opcode
+
+aml_do_const:
+	push	rax
+	lea	rdx, [aml_msg_const]
+	call	print_str
+	pop	rdx
+	movzx	edx, dl
+	mov	ecx, 2
+	call	print_hex
+	lea	rdx, [newline]
+	call	print_str
+	ret
 
 aml_handle_ext_op:
 	call	aml_read_u8
@@ -1363,12 +1481,16 @@ aml_do_external:
 	lea	rdx, [newline]
 	call	print_str
 
-	mov	ecx, AML_NODE_EXTERNAL        ; NEW
-	call	aml_ns_define_log             ; NEW
-	mov	[aml_tmp_idx], eax            ; NEW
+%if AML_EXTERNAL_CREATES_NODE
+	mov	ecx, AML_NODE_EXTERNAL
+	call	aml_ns_define_log
+	mov	[aml_tmp_idx], eax
+%endif
 
 	call	aml_read_u8
-	call	aml_ns_tmp_set8               ; NEW : type d'objet
+%if AML_EXTERNAL_CREATES_NODE
+	call	aml_ns_tmp_set8               ; type d'objet
+%endif
 	call	aml_read_u8
 
 	ret
@@ -2332,9 +2454,191 @@ aml_read_termarg_integer:
 	cmp	al, 0x0E
 	je	aml_ti_qword
 
+	; ---- NEW : reference par nom (ex: OperationRegion (X, SystemMemory, PNVB, PNVL)) ----
+	cmp	al, 0x5C
+	je	aml_ti_name
+	cmp	al, 0x5E
+	je	aml_ti_name
+	cmp	al, 0x2E
+	je	aml_ti_name
+	cmp	al, 0x2F
+	je	aml_ti_name
+	cmp	al, '_'
+	je	aml_ti_name
+	cmp	al, 'A'
+	jb	aml_ti_notname
+	cmp	al, 'Z'
+	jbe	aml_ti_name
+aml_ti_notname:
+	; ---- build 4 : Local/Arg, logiques, DerefOf/SizeOf, CondRefOf ----
+	cmp	al, 0x60
+	jb	aml_ti_chk_ext
+	cmp	al, 0x6E
+	jbe	aml_ti_localarg
+aml_ti_chk_ext:
+	cmp	al, 0x5B
+	je	aml_ti_extop
+	cmp	al, 0x92                      ; LNot (aussi LNotEqual/LLessEqual/LGreaterEqual : 92 93..95)
+	je	aml_ti_unary
+	cmp	al, 0x83                      ; DerefOf
+	je	aml_ti_unary
+	cmp	al, 0x87                      ; SizeOf
+	je	aml_ti_unary
+	cmp	al, 0x88                      ; Index (2 operandes + target = meme forme que binop)
+	je	aml_ti_binop
+	cmp	al, 0x90                      ; LAnd
+	je	aml_ti_logic2
+	cmp	al, 0x91                      ; LOr
+	je	aml_ti_logic2
+	cmp	al, 0x93                      ; LEqual
+	jb	aml_ti_chk_binop
+	cmp	al, 0x95                      ; LGreater / LLess
+	jbe	aml_ti_logic2
+aml_ti_chk_binop:
+	; ---- NEW : expressions binaires Add/Subtract/Multiply/Shift/And/Or/... ----
+	cmp	al, 0x72
+	je	aml_ti_binop
+	cmp	al, 0x74
+	je	aml_ti_binop
+	cmp	al, 0x77
+	je	aml_ti_binop
+	cmp	al, 0x79
+	jb	aml_ti_fail
+	cmp	al, 0x7F
+	jbe	aml_ti_binop
+
+aml_ti_fail:
 	mov	byte [aml_error], 1
 	xor	eax, eax
 	ret
+
+aml_ti_name:                          ; valeur non resolue => 0 (a resoudre avec l'interpreteur)
+	call	aml_skip_namestring
+	xor	eax, eax
+	ret
+
+aml_ti_binop:
+	mov	edx, [aml_ti_depth]
+	cmp	edx, 16
+	jae	aml_ti_fail
+	inc	edx
+	mov	[aml_ti_depth], edx
+	inc	r14                           ; opcode
+	call	aml_read_termarg_integer      ; operande 1
+	cmp	byte [aml_error], 0
+	jne	aml_ti_binop_out
+	call	aml_read_termarg_integer      ; operande 2
+	cmp	byte [aml_error], 0
+	jne	aml_ti_binop_out
+	call	aml_skip_target
+aml_ti_binop_out:
+	dec	dword [aml_ti_depth]
+	xor	eax, eax
+	ret
+
+aml_ti_localarg:                      ; Local0-7 / Arg0-6 : 1 octet
+	inc	r14
+	xor	eax, eax
+	ret
+
+aml_ti_unary:                         ; 1 operande
+	mov	edx, [aml_ti_depth]
+	cmp	edx, 16
+	jae	aml_ti_fail
+	inc	edx
+	mov	[aml_ti_depth], edx
+	inc	r14
+	call	aml_read_termarg_integer
+	jmp	aml_ti_binop_out
+
+aml_ti_logic2:                        ; 2 operandes, pas de target
+	mov	edx, [aml_ti_depth]
+	cmp	edx, 16
+	jae	aml_ti_fail
+	inc	edx
+	mov	[aml_ti_depth], edx
+	inc	r14
+	call	aml_read_termarg_integer
+	cmp	byte [aml_error], 0
+	jne	aml_ti_binop_out
+	call	aml_read_termarg_integer
+	jmp	aml_ti_binop_out
+
+aml_ti_extop:                         ; 5B xx : seulement CondRefOf (5B 12 SuperName Target)
+	mov	rcx, 2
+	call	aml_require
+	cmp	byte [r14 + 1], 0x12
+	jne	aml_ti_fail
+	add	r14, 2
+	call	aml_skip_target               ; SuperName
+	call	aml_skip_target               ; Target
+	xor	eax, eax
+	ret
+
+; Target : NullName (0x00), Local/Arg (0x60-0x6E) ou NameString
+aml_skip_target:
+	cmp	r14, r15
+	jae	aml_error_truncated
+	movzx	eax, byte [r14]
+	test	al, al
+	jz	aml_skip_target_1
+	cmp	al, 0x60
+	jb	aml_skip_namestring
+	cmp	al, 0x6E
+	ja	aml_skip_namestring
+aml_skip_target_1:
+	inc	r14
+	ret
+
+; saute un NameString sans rien afficher ni toucher aml_name_buf / aml_path_*
+aml_skip_namestring:
+	cmp	r14, r15
+	jae	aml_error_truncated
+	cmp	byte [r14], 0x5C
+	jne	aml_sns_caret
+	inc	r14
+	jmp	aml_sns_seg
+aml_sns_caret:
+	cmp	byte [r14], 0x5E
+	jne	aml_sns_seg
+	inc	r14
+	cmp	r14, r15
+	jae	aml_error_truncated
+	jmp	aml_sns_caret
+aml_sns_seg:
+	cmp	r14, r15
+	jae	aml_error_truncated
+	movzx	eax, byte [r14]
+	cmp	al, 0x00
+	je	aml_sns_null
+	cmp	al, 0x2E
+	je	aml_sns_dual
+	cmp	al, 0x2F
+	je	aml_sns_multi
+	mov	rcx, 4
+	call	aml_require
+	add	r14, 4
+	ret
+aml_sns_null:
+	inc	r14
+	ret
+aml_sns_dual:
+	inc	r14
+	mov	rcx, 8
+	call	aml_require
+	add	r14, 8
+	ret
+aml_sns_multi:
+	inc	r14
+	call	aml_read_u8
+	test	eax, eax
+	jz	aml_error_bad_name
+	shl	eax, 2
+	mov	ecx, eax
+	call	aml_require
+	add	r14, rcx
+	ret
+; ---- fin NEW ----
 
 aml_ti_truncated:
 	mov	byte [aml_error], 1
@@ -2548,7 +2852,32 @@ aml_ns_define:
 	dec	eax
 	lea	rsi, [aml_path_segs]
 	lea	rsi, [rsi + rax*4]
-	pop	rcx
+
+	; ---- NEW : si un Scope() anterieur a deja cree ce nom (placeholder
+	;      de type SCOPE), on le promeut au vrai type au lieu de dupliquer ----
+	pop	rcx                           ; ecx = type demande
+	push	rcx
+	push	rsi
+	mov	ecx, [aml_def_parent]
+	call	aml_ns_lookup_child           ; rsi = nom -> eax = idx ou NONE
+	pop	rsi
+	pop	rdx                           ; edx = type demande
+	mov	r8d, edx
+	cmp	eax, AML_NODE_NONE
+	je	aml_nsdf_new
+	cmp	r8d, AML_NODE_SCOPE
+	je	aml_nsdf_new
+	mov	r9d, eax
+	call	aml_ns_node_addr              ; rax = adresse (clobber rdx)
+	cmp	byte [rax + AN_TYPE], AML_NODE_SCOPE
+	jne	aml_nsdf_new
+	mov	[rax + AN_TYPE], r8b          ; promotion
+	mov	eax, r9d
+	mov	[aml_def_idx], eax
+	ret
+aml_nsdf_new:
+	mov	ecx, r8d
+	; ---- fin NEW ----
 	call	aml_namespace_alloc_node
 	mov	[aml_def_idx], eax
 	mov	ecx, [aml_def_parent]
@@ -2810,11 +3139,59 @@ aml_ns_debug_node:
 	pop	rcx
 	jmp	aml_ns_debug_node_label
 
+; ligne de diagnostic : offset AML (dans le bloc AML) ou le parse s'est arrete
+aml_print_stop_line:
+	lea	rdx, [aml_msg_stop_at]
+	call	print_str
+	mov	rdx, r14
+	sub	rdx, [aml_table_start]
+	mov	ecx, 8
+	call	print_hex
+	lea	rdx, [aml_msg_stop_nodes]
+	call	print_str
+	mov	edx, [aml_node_count]
+	mov	ecx, 8
+	call	print_hex
+	lea	rdx, [newline]
+	call	print_str
+
+	; ---- octets autour de l'arret : 8 avant, '|' puis l'octet fautif et la suite ----
+	lea	rdx, [aml_msg_stop_bytes]
+	call	print_str
+	mov	rsi, r14
+	sub	rsi, 8
+	cmp	rsi, [aml_table_start]
+	jae	aml_psl_start_ok
+	mov	rsi, [aml_table_start]
+aml_psl_start_ok:
+	mov	r10d, 20
+aml_psl_loop:
+	cmp	rsi, [aml_table_end]
+	jae	aml_psl_done
+	cmp	rsi, r14
+	jne	aml_psl_nomark
+	lea	rdx, [aml_msg_stop_mark]
+	call	print_str
+aml_psl_nomark:
+	movzx	edx, byte [rsi]
+	mov	ecx, 2
+	call	print_hex
+	lea	rdx, [aml_nd_space]
+	call	print_str
+	inc	rsi
+	dec	r10d
+	jnz	aml_psl_loop
+aml_psl_done:
+	lea	rdx, [newline]
+	call	print_str
+	ret
+
 ; =====================================================================
 ;  DUMP de l'arbre (iteratif : pas de recursion, pas de pile CPU)
 ;  Parcours preordre via first_child / next_sibling / parent.
 ; =====================================================================
 aml_namespace_dump:
+	mov	byte [aml_dump_done], 1       ; NEW
 	lea	rdx, [aml_msg_ns_hdr]
 	call	print_str
 	cmp	dword [aml_node_count], 0
@@ -3347,7 +3724,7 @@ aml_msg_numelements:
 	dw	' ',' ','n','u','m','E','l','e','m','e','n','t','s','=','0','x',0
 
 aml_msg_unsupported_opcode:
-	dw	'U','N','S','U','P','P','O','R','T','E','D',' ','O','P','C','O','D','E',':',' ','0','x',0
+	dw	'U','N','S','U','P','P','O','R','T','E','D',' ','O','P','C','O','D','E',':',' ',0
 
 aml_msg_unsupported_data:
 	dw	'U','N','S','U','P','P','O','R','T','E','D',' ','D','A','T','A',' ','O','B','J','E','C','T',',',' ','S','T','O','P','P','I','N','G',13,10,0
@@ -3417,6 +3794,21 @@ aml_vk_names:                 ; ordre AML_VK_*
 aml_lbl_scope:
 	U16 "SCOPE"
 	dw 0
+aml_msg_stop_at:
+	U16 "AML PARSE STOPPED [build 4] at AML offset "
+	dw 0
+aml_msg_const:
+	U16 "CONST (ignore): "
+	dw 0
+aml_msg_stop_bytes:
+	U16 "BYTES: "
+	dw 0
+aml_msg_stop_mark:
+	U16 "| "
+	dw 0
+aml_msg_stop_nodes:
+	U16 "  NODES="
+	dw 0
 aml_nd_prefix:
 	U16 "NODE: "
 	dw 0
@@ -3427,7 +3819,7 @@ aml_nd_eq:
 	dw 0
 aml_msg_ns_hdr:
 	dw 13,10
-	U16 "ACPI NAMESPACE"
+	U16 "ACPI NAMESPACE (build 4)"
 	dw 13,10,13,10,0
 aml_msg_ns_full:
 	U16 "AML ERROR: NAMESPACE FULL"
@@ -3517,6 +3909,11 @@ aml_pathtmp:         resd 128
 aml_path_buf:        resw 1024
 alignb	8
 aml_nodes:           resb AML_NODE_SIZE * AML_NODE_MAX
+alignb	4
+aml_redraw_tick:     resd 1
+aml_ti_depth:        resd 1
+aml_dump_done:       resb 1
+alignb	4
 
 log_buffer:
 	resw	LOG_BUF_WORDS
@@ -3582,4 +3979,3 @@ debug_hex_scratch:
 
 line_scratch:
 	resw	LINE_SCRATCH_WORDS
-	
