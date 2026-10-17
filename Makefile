@@ -134,9 +134,18 @@ run-bios-log: bios
 uefi: $(BUILD_DIR)/UEFIRun/BOOTX64.EFI
 
 
-$(BUILD_DIR)/UEFI/bootx64.o: UEFI/bootloader/bootx64.asm
+$(BUILD_DIR)/UEFI/bootx64.o: \
+	UEFI/bootloader/bootx64.asm \
+	UEFI/bootloader/config.inc \
+	UEFI/bootloader/macros.inc \
+	UEFI/bootloader/logging.asm \
+	UEFI/bootloader/aml_parse.asm \
+	UEFI/bootloader/namespace.asm \
+	UEFI/bootloader/aml_errors.asm \
+	UEFI/bootloader/data.asm \
+	UEFI/bootloader/bss.asm
 	mkdir -p $(dir $@)
-	nasm -f win64 $< -o $@
+	nasm -f win64 -I UEFI/bootloader/ $< -o $@
 
 
 $(BUILD_DIR)/UEFIRun/BOOTX64.EFI: \
