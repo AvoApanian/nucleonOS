@@ -461,7 +461,7 @@ aml_ns_debug_node:
 aml_print_stop_line:
 	lea	rdx, [aml_msg_stop_at]
 	call	print_str
-	mov	rdx, r14
+	mov	rdx, [aml_error_offset]
 	sub	rdx, [aml_table_start]
 	mov	ecx, 8
 	call	print_hex
@@ -476,7 +476,7 @@ aml_print_stop_line:
 	; ---- octets autour de l'arret : 8 avant, '|' puis l'octet fautif et la suite ----
 	lea	rdx, [aml_msg_stop_bytes]
 	call	print_str
-	mov	rsi, r14
+	mov	rsi, [aml_error_offset]
 	sub	rsi, 8
 	cmp	rsi, [aml_table_start]
 	jae	aml_psl_start_ok
@@ -486,7 +486,7 @@ aml_psl_start_ok:
 aml_psl_loop:
 	cmp	rsi, [aml_table_end]
 	jae	aml_psl_done
-	cmp	rsi, r14
+	cmp	rsi, [aml_error_offset]
 	jne	aml_psl_nomark
 	lea	rdx, [aml_msg_stop_mark]
 	call	print_str

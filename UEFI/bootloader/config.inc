@@ -15,7 +15,7 @@ AML_BREAK_OP  equ 0xA5
 
 %define AML_PARSE_METHOD_BODY 0
 
-%define AML_TRACE_OPCODES   0   ; 1 = lignes "OPCODE AT:" (log ENORME sur un vrai DSDT)
+%define AML_TRACE_OPCODES   1   ; trace temporaire
 %define AML_EXTERNAL_CREATES_NODE 0   ; 0 = External() est une declaration: pas de node
 %define AML_LOG_FIELD_NODES 0
 AML_REDRAW_MASK   equ 0x3FF            ; redessine l'ecran 1 fois sur 1024 pendant le parse   ; 1 = une ligne NODE: par field unit (beaucoup de lignes)

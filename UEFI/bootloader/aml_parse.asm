@@ -261,6 +261,20 @@ aml_tlp_done:
 
 aml_parse_one_object:
 %if AML_TRACE_OPCODES
+	; Trace limitee aux offsets AML proches de l'erreur observee.
+	mov	rax, r14
+	sub	rax, [aml_table_start]
+	cmp	rax, 0xC330
+	jb	aml_dbg_trace_skip
+	cmp	rax, 0xC3A0
+	jbe	aml_dbg_trace_active
+	cmp	rax, 0x1C200
+	jb	aml_dbg_trace_skip
+	cmp	rax, 0x1C270
+	ja	aml_dbg_trace_skip
+
+aml_dbg_trace_active:
+
 	lea	rdx, [aml_msg_opcode]
 	call	print_str
 
@@ -297,6 +311,8 @@ aml_dbg_next:
 aml_dbg_bytes_done:
 	lea	rdx, [newline]
 	call	print_str
+
+aml_dbg_trace_skip:
 %endif
 
 	call	aml_read_u8
@@ -354,6 +370,16 @@ aml_dbg_bytes_done:
 	je	aml_do_const
 	cmp	al, 0xFF
 	je	aml_do_const
+
+	; Constantes entieres AML : Byte, Word, DWord, QWord.
+	cmp	al, 0x0A
+	je	aml_do_integer_const
+	cmp	al, 0x0B
+	je	aml_do_integer_const
+	cmp	al, 0x0C
+	je	aml_do_integer_const
+	cmp	al, 0x0E
+	je	aml_do_integer_const
 	; ---- fin NEW ----
 
 	dec	r14
@@ -369,6 +395,15 @@ aml_do_const:
 	call	print_hex
 	lea	rdx, [newline]
 	call	print_str
+	ret
+
+; Consomme une constante entiere AML complete.
+; Le dispatcher a deja avance r14 d'un octet.
+aml_do_integer_const:
+	dec	r14
+	call	aml_read_termarg_integer
+	cmp	byte [aml_error], 0
+	jne	aml_unsupported_dataobject
 	ret
 
 aml_handle_ext_op:

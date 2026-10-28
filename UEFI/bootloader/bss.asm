@@ -37,6 +37,9 @@ aml_table_start:
 aml_table_end:
 	resq	1
 
+aml_error_offset:
+	resq	1
+
 saved_rsp:
 	resq	1
 
