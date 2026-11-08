@@ -459,6 +459,11 @@ aml_ns_debug_node:
 
 ; ligne de diagnostic : offset AML (dans le bloc AML) ou le parse s'est arrete
 aml_print_stop_line:
+	movzx	edx, byte [aml_error_kind]
+	mov	ecx, 2
+	call	print_hex
+	lea	rdx, [aml_nd_space]
+	call	print_str
 	lea	rdx, [aml_msg_stop_at]
 	call	print_str
 	mov	rdx, [aml_error_offset]
@@ -469,6 +474,11 @@ aml_print_stop_line:
 	call	print_str
 	mov	edx, [aml_node_count]
 	mov	ecx, 8
+	call	print_hex
+	lea	rdx, [aml_msg_error_code]
+	call	print_str
+	movzx	edx, byte [aml_error_kind]
+	mov	ecx, 2
 	call	print_hex
 	lea	rdx, [newline]
 	call	print_str

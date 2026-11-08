@@ -335,6 +335,10 @@ aml_msg_stop_mark:
 aml_msg_stop_nodes:
 	U16 "  NODES="
 	dw 0
+
+aml_msg_error_code:
+	U16 " ERROR CODE="
+	dw 0
 aml_nd_prefix:
 	U16 "NODE: "
 	dw 0

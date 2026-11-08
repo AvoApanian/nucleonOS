@@ -270,7 +270,7 @@ aml_parse_one_object:
 	jbe	aml_dbg_trace_active
 	cmp	rax, 0x1C200
 	jb	aml_dbg_trace_skip
-	cmp	rax, 0x1C270
+	cmp	rax, 0x1C2D0
 	ja	aml_dbg_trace_skip
 
 aml_dbg_trace_active:
@@ -279,23 +279,25 @@ aml_dbg_trace_active:
 	call	print_str
 
 	mov	rdx, r14
+	sub	rdx, [aml_table_start]
 	mov	ecx, 16
 	call	print_hex
 
 	lea	rdx, [aml_msg_bytes]
 	call	print_str
 
-	xor	r10d, r10d
+	push	r12
+	xor	r12d, r12d
 aml_dbg_bytes:
-	cmp	r10d, 4
+	cmp	r12d, 4
 	jae	aml_dbg_bytes_done
 
 	mov	rax, r14
-	add	rax, r10
+	add	rax, r12
 	cmp	rax, r15
 	jae	aml_dbg_oob
 
-	movzx	edx, byte [r14 + r10]
+	movzx	edx, byte [r14 + r12]
 	mov	ecx, 2
 	call	print_hex
 	jmp	aml_dbg_next
@@ -305,10 +307,11 @@ aml_dbg_oob:
 	call	print_str
 
 aml_dbg_next:
-	inc	r10d
+	inc	r12d
 	jmp	aml_dbg_bytes
 
 aml_dbg_bytes_done:
+	pop	r12
 	lea	rdx, [newline]
 	call	print_str
 
@@ -1094,9 +1097,9 @@ aml_field_reserved:
 	jmp	aml_field_loop
 
 aml_field_access:
-	mov	rcx, 3
+	mov	rcx, 2
 	call	aml_require
-	add	r14, 3
+	add	r14, 2
 
 	lea	rdx, [aml_msg_access]
 	call	print_str
@@ -1104,9 +1107,9 @@ aml_field_access:
 	jmp	aml_field_loop
 
 aml_field_extaccess:
-	mov	rcx, 4
+	mov	rcx, 3
 	call	aml_require
-	add	r14, 4
+	add	r14, 3
 
 	lea	rdx, [aml_msg_access]
 	call	print_str

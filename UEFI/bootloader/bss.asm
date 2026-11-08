@@ -18,6 +18,9 @@ hex_scratch:
 aml_error:
 	resb	1
 
+aml_error_kind:
+	resb	1
+
 alignb	4
 
 aml_field_bit_offset:
