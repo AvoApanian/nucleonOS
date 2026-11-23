@@ -8,6 +8,8 @@ aml_dump:
 	mov	[aml_table_start], r14
 	mov	[aml_table_end], r15
 	mov	dword [aml_pkg_depth], 0
+	mov	dword [aml_ti_depth], 0
+	mov	dword [aml_ti_call_depth], 0
 	mov	byte [aml_error], 0
 
 	lea	rdx, [amlParseStart]
@@ -1535,8 +1537,22 @@ aml_nse_skip:
 	ret
 
 aml_read_termarg_integer:
-	mov	byte [aml_error], 0
+	; Initialisation uniquement pour un appel independant.
+	cmp	dword [aml_ti_call_depth], 0
+	jne	aml_ti_reader_nested
 
+	mov	byte [aml_error], 0
+	mov	dword [aml_ti_depth], 0
+
+aml_ti_reader_nested:
+	inc	dword [aml_ti_call_depth]
+	call	aml_read_termarg_integer_impl
+	dec	dword [aml_ti_call_depth]
+	ret
+
+; Implementation du lecteur. Les appels recursifs utilisent
+; toujours le wrapper aml_read_termarg_integer.
+aml_read_termarg_integer_impl:
 	cmp	r14, r15
 	jae	aml_ti_truncated
 

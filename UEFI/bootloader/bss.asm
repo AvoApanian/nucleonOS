@@ -82,6 +82,7 @@ aml_nodes:           resb AML_NODE_SIZE * AML_NODE_MAX
 alignb	4
 aml_redraw_tick:     resd 1
 aml_ti_depth:        resd 1
+aml_ti_call_depth:   resd 1
 aml_dump_done:       resb 1
 alignb	4
 
